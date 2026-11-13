@@ -302,6 +302,23 @@ for (const maxStages of [1, 8]) {
   });
 }
 
+test('默认不限制单轮连续关卡数，超过 8 关可一轮自动通关', async t => {
+  const exercises = Array.from({ length: 10 }, (_, index) => exercise('a', index + 1, {
+    nextTaskId: index < 9 ? 'game-a' + (index + 2) : undefined,
+  }));
+  const seenStages = [];
+  const { open } = fixture(t, exercises, async agent => {
+    seenStages.push(agent.stageId);
+    await agent.saveFile('src/main.py', 'print(42)', agent.signal);
+    assert.equal((await agent.evaluate(agent.signal)).status, 'passed');
+    return { status: 'finished' };
+  }, { nativeTools: true });
+  const queue = open();
+  const task = queue.enqueue(scopes.a, { start: true });
+  await expectState(queue, task.id, 'passed');
+  assert.equal(seenStages.length, 10);
+});
+
 test('首次解题仅收到公开输入和期望输出，评测后继续提供实际输出', async t => {
   const stage = exercise('a', 1, {
     publicTests: [{ input: '3\n', expected: '6\n', actual: 'stale output' }, { actual: 'without sample' }],

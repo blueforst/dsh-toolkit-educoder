@@ -21,7 +21,7 @@ export function privateDirectory(root) {
 export function createService({
   root, credentials, transport, runAgent, inspectBrowser, experience, extended = false, nativeTools = false, readSaveEvidence,
   pollMs, pollAttempts, allowAccounts,
-  allowTasks = true, mode = 'disabled',
+  allowTasks = true, mode = 'disabled', logger,
 }) {
   const extendedMode = Boolean(extended || nativeTools);
   privateDirectory(root);
@@ -44,6 +44,7 @@ export function createService({
     readSaveEvidence,
     pollMs,
     pollAttempts,
+    logger,
     accounts: {
       withSession: (...args) => {
         requireTasks();
@@ -54,6 +55,7 @@ export function createService({
   const queue = createScheduler({
     file: join(root, 'queue.sqlite'),
     automaticRetries: extendedMode,
+    logger,
     ...workers,
   });
   try {
@@ -90,7 +92,7 @@ export function createService({
   }
 
   async function allocate(targets, start) {
-    if (!Array.isArray(targets) || !targets.length || targets.length > 100 || typeof start !== 'boolean') {
+    if (!Array.isArray(targets) || !targets.length || targets.length > 1000 || typeof start !== 'boolean') {
       fail('invalid_input');
     }
     const validated = [];

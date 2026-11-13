@@ -160,6 +160,7 @@ export function apply(ctx) {
         )),
         allowTasks,
         mode: fixture ? 'fixture' : live ? 'live' : 'disabled',
+        logger: ctx.logger,
       });
       unregister = registerApi(ctx, service);
     } catch (error) {

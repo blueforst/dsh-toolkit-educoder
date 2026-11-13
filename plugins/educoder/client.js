@@ -692,7 +692,7 @@ window.__ModuleLoader__.load({
                 busy && activeKey === 'settings' ? '…' : concurrency),
               h('button', {
                 type: 'button', 'aria-label': '增加全局并发',
-                disabled: busy || concurrency >= 8,
+                disabled: busy || concurrency >= 32,
                 onClick: () => saveConcurrency(concurrency + 1),
               }, '+')))),
 

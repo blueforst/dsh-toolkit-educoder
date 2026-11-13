@@ -50,7 +50,7 @@ function redactSession(text, session) {
 }
 
 export function createWorkers({ transport, accounts, runAgent, inspectBrowser, experience, extended = false, nativeTools = false,
-  readSaveEvidence, pollMs = 1500, pollAttempts = 20, maxStages = 8 }) {
+  readSaveEvidence, pollMs = 1500, pollAttempts = 60, maxStages = null, logger }) {
   const extendedMode = Boolean(extended || nativeTools);
   async function readVerdict(session, target, marker, signal, priorFailedVerdict = null) {
     let previous;
@@ -122,7 +122,7 @@ export function createWorkers({ transport, accounts, runAgent, inspectBrowser, e
       // 续关前重新核验上一关。重复读取已完成的关卡不占本轮的新关卡配额。
       const continuing = task.binding?.taskId === remote.binding.taskId && remote.state === 'passed' &&
         Boolean(task.nextTaskId && task.nextTaskId === remote.nextTaskId);
-      const stageLimit = maxStages + Number(continuing);
+      const stageLimit = maxStages == null ? Infinity : maxStages + Number(continuing);
       const visited = new Set();
       for (let stage = 0; stage < stageLimit; stage++) {
         signal.throwIfAborted();
@@ -223,7 +223,7 @@ export function createWorkers({ transport, accounts, runAgent, inspectBrowser, e
             title: redactSession(remote.title, session),
             instructions: redactSession(remote.instructions, session),
             examples: remote.feedback?.publicTests?.filter(example => example.input !== undefined || example.expected !== undefined)
-              .slice(0, 4).map(({ input, expected }) => ({
+              .map(({ input, expected }) => ({
                 input: input === undefined ? undefined : redactSession(input, session),
                 expected: expected === undefined ? undefined : redactSession(expected, session),
               })),
@@ -347,6 +347,14 @@ export function createWorkers({ transport, accounts, runAgent, inspectBrowser, e
               Boolean(remote.failedVerdict && remote.failedVerdict !== priorFailedVerdict);
             if (failedVerification) return { status: 'failed', code: 'verification_failed' };
             const code = ['timeout', 'budget'].includes(result.status) ? result.status : 'agent_failed';
+            if (code === 'agent_failed') {
+              logger?.warn?.('EduCoder 关卡执行失败。', {
+                taskId: task.id,
+                stageId: binding.taskId,
+                phase: result.code ?? 'agent_failed',
+                steps: result.steps ?? 0,
+              });
+            }
             return { status: 'failed', code };
           }
         }

@@ -12,8 +12,8 @@
         api: openai-completions
         baseURL: http://172.18.0.1:9193/v1
         cacheRetention: long
-        requestImageMaxBytes: 524288
-        maxRequestImageBytes: 2796208
+        requestImageMaxBytes: 2097152
+        maxRequestImageBytes: 44739244
         compat:
           supportsStore: false
           supportsDeveloperRole: false
@@ -25,7 +25,7 @@
             name: DeepSeek V4.1 Flash
             input: [text, image]
             contextWindow: 1000000
-            maxTokens: 4096
+            maxTokens: 384000
       opencode-go-native:
         displayName: OpenCode Go（DSH）
         apiKeyEnv: DSH_GO_MODEL_TOKEN
@@ -33,7 +33,7 @@
         baseURL: http://172.18.0.1:9193/native/v1
         cacheRetention: long
         requestImageMaxBytes: 4194304
-        maxRequestImageBytes: 11184828
+        maxRequestImageBytes: 44739244
         compat:
           supportsStore: false
           supportsDeveloperRole: false
@@ -45,4 +45,4 @@
             name: DeepSeek V4.1 Flash
             input: [text, image]
             contextWindow: 1000000
-            maxTokens: 4096
+            maxTokens: 384000

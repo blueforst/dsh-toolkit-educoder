@@ -26,7 +26,7 @@ ProtectControlGroups=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictSUIDSGID=yes
 CapabilityBoundingSet=
-TasksMax=24
+TasksMax=128
 
 [Install]
 WantedBy=multi-user.target

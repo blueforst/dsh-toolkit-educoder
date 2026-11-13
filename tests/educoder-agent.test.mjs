@@ -433,6 +433,79 @@ test('截止时取消 Agent 并等待已启动的工具收尾后再释放会话'
   assert(runs[0].agent.session.flushed && runs[0].disposed);
 });
 
+test('默认不限制步数和单次输出 token，并在预算截断与超时时保留会话续接', async t => {
+  const { runs, run } = await fixture(t, async ({ beginStep, finishStep, finishTurn }) => {
+    for (let step = 0; step < 30; step++) {
+      assert.equal(await beginStep(), 'enter');
+      finishStep(usage);
+    }
+    finishTurn();
+  });
+  const unrestricted = await run(codeTask());
+  assert.equal(unrestricted.status, 'finished');
+  assert.equal(unrestricted.steps, 30);
+  assert.equal(Object.hasOwn(runs[0].createOptions.agentOptions, 'maxTokens'), false);
+  assert.ok(unrestricted.sessionResume?.sessionId);
+
+  const budgeted = await fixture(t, async ({ beginStep, finishStep, finishTurn }) => {
+    assert.equal(await beginStep(), 'enter');
+    finishStep(usage);
+    assert.equal(await beginStep(), 'reject');
+    finishTurn('blocked');
+  }, { maxSteps: 1 });
+  const budgetResult = await budgeted.run(codeTask());
+  assert.equal(budgetResult.status, 'budget');
+  assert.ok(budgetResult.sessionResume?.sessionId);
+
+  const timed = await fixture(t, async ({ beginStep, finishStep, signal, finishTurn }) => {
+    assert.equal(await beginStep(), 'enter');
+    finishStep(usage);
+    await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+    finishTurn('cancelled');
+  }, { timeoutMs: 30 });
+  const timeoutResult = await timed.run(codeTask());
+  assert.equal(timeoutResult.status, 'timeout');
+  assert.ok(timeoutResult.sessionResume?.sessionId);
+});
+
+test('Agent 异常失败时记录脱敏日志且不泄露会话凭据', async t => {
+  const warnings = [];
+  const task = codeTask();
+  const { run } = await fixture(t, async ({ finishTurn }) => {
+    finishTurn('error');
+  }, {}, {
+    logger: { warn: (...args) => warnings.push(args) },
+  });
+  const turnFailure = await run(codeTask());
+  assert.equal(turnFailure.status, 'failed');
+  assert.equal(turnFailure.code, 'agent_turn_failed');
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0][1].phase, 'agent_turn_failed');
+  assert.equal(warnings[0][1].turnReason, 'error');
+
+  const failWarnings = [];
+  const { run: failRun } = await fixture(t, async () => {}, {}, {
+    logger: { warn: (...args) => failWarnings.push(args) },
+    llm: {
+      async resolveModelInfo() {
+        throw Object.assign(new Error(`boom ${task.session.session} cookie: private`), { code: 'ECONNRESET' });
+      },
+    },
+  });
+  const result = await failRun(codeTask({
+    ...task,
+    imageCount: 1,
+    loadImages: async () => [],
+  }));
+  assert.equal(result.status, 'failed');
+  assert.equal(result.code, 'image_unavailable');
+  assert.equal(failWarnings.length, 1);
+  const serialized = JSON.stringify(failWarnings[0]);
+  assert.match(serialized, /ECONNRESET/);
+  assert.ok(!serialized.includes(task.session.session));
+  assert.ok(!serialized.includes('private'));
+});
+
 test('专用实例的全局工具边界仅临时授权正在运行的 Agent 执行原生编码工具', async t => {
   let globalGuard;
   const toolBoundary = installEduCoderToolBoundary({

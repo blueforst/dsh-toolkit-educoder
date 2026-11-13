@@ -75,9 +75,10 @@ class RelayTest(unittest.TestCase):
         self.assertEqual(self.post(token=UPSTREAM_KEY)[0], 401)
         self.assertEqual(self.post(path='/v1/models')[0], 404)
         self.assertEqual(self.post({**self.payload, 'model': 'other'})[0], 400)
-        self.assertEqual(self.post({**self.payload, 'max_tokens': 4097})[0], 400)
+        self.assertEqual(self.post({**self.payload, 'max_tokens': relay.MAX_OUTPUT_TOKENS}), (200, SSE))
+        self.assertEqual(self.post({**self.payload, 'max_tokens': relay.MAX_OUTPUT_TOKENS + 1})[0], 400)
         self.assertEqual(self.post({**self.payload, 'tools': self.payload['tools'][:2]})[0], 400)
-        self.assertEqual(len(self.upstream.requests), 0)
+        self.assertEqual(len(self.upstream.requests), 1)
 
     def test_native_chat_streams_without_tools(self):
         native = {key: value for key, value in self.payload.items() if key != 'tools'}
@@ -213,33 +214,32 @@ class RelayTest(unittest.TestCase):
         smaller = [{'role': 'user', 'content': [sized_image(relay.MAX_IMAGE_BYTES + 1)]}]
         self.assertEqual(self.post({**native, 'messages': smaller})[0], 400)
 
-        for images in ([native_image, native_image, PNG_IMAGE], [sized_image(relay.MAX_NATIVE_IMAGE_BYTES + 1)]):
+        max_count = relay.MAX_NATIVE_TOTAL_IMAGE_BYTES // relay.MAX_NATIVE_IMAGE_BYTES
+        for images in (([native_image] * max_count) + [PNG_IMAGE], [sized_image(relay.MAX_NATIVE_IMAGE_BYTES + 1)]):
             self.assertEqual(self.post({**native, 'messages': [{'role': 'user', 'content': images}]}, path=NATIVE_PATH)[0], 400)
 
-        longer = [{'role': 'user', 'content': '继续'}] * (relay.MAX_MESSAGES + 1)
+        longer = [{'role': 'user', 'content': '继续'}] * 400
         self.assertEqual(self.post({**native, 'messages': longer}, path=NATIVE_PATH)[0], 200)
-        self.assertEqual(self.post({**native, 'messages': longer})[0], 400)
-        self.assertEqual(self.post({**native, 'messages': longer * 4}, path=NATIVE_PATH)[0], 400)
+        self.assertEqual(self.post({**self.payload, 'messages': longer})[0], 200)
 
     def test_native_replays_images_across_stages(self):
         stages = [{'role': 'user', 'content': [
-            {'type': 'text', 'text': f'第 {stage} 关'}, *([PNG_IMAGE] * 4),
-        ]} for stage in (1, 2)]
+            {'type': 'text', 'text': f'第 {stage} 关'}, *([PNG_IMAGE] * 6),
+        ]} for stage in (1, 2, 3)]
         native = {**self.payload, 'messages': [*self.payload['messages'], *stages]}
         self.assertEqual(self.post(native, path=NATIVE_PATH), (200, SSE))
         self.assertEqual(json.loads(self.upstream.requests[0].data)['messages'], native['messages'])
         self.assertEqual(self.post(native)[0], 400)
 
-        excessive = {'role': 'user', 'content': [PNG_IMAGE] * (relay.MAX_NATIVE_IMAGES - 8 + 1)}
+        excessive = {'role': 'user', 'content': [PNG_IMAGE] * (relay.MAX_NATIVE_IMAGES - 18 + 1)}
         self.assertEqual(self.post({**native, 'messages': [*native['messages'], excessive]}, path=NATIVE_PATH)[0], 400)
         self.assertEqual(len(self.upstream.requests), 1)
 
-    def test_session_limit(self):
-        for _ in range(relay.SESSION_LIMIT):
+    def test_unbounded_session_and_rate_requests(self):
+        for _ in range(150):
             self.assertEqual(self.post()[0], 200)
-        self.assertEqual(self.post()[0], 429)
-        self.assertEqual(self.post(path=NATIVE_PATH)[0], 200)
-        self.assertEqual(self.post(session='dsh-b')[0], 200)
+            self.assertEqual(self.post(path=NATIVE_PATH)[0], 200)
+        self.assertEqual(len(self.upstream.requests), 300)
 
 
 if __name__ == '__main__':

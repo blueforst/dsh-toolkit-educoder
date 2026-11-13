@@ -334,3 +334,29 @@ test('原生任务达到历史尝试上限后，手动暂停和继续仍沿用�
   assert.equal(running.startedAt, paused.startedAt);
   assert.equal(queue.pause(task.id).status, 'paused');
 });
+
+test('默认允许超过 3 次自动重试，且调度异常时记录脱敏日志', { timeout: 8000 }, async t => {
+  const warnings = [];
+  let attempts = 0;
+  const queue = setup(t).open({
+    automaticRetries: true,
+    logger: { warn: (...args) => warnings.push(args) },
+    worker(task, { checkpoint }) {
+      attempts++;
+      if (attempts <= 4) {
+        throw Object.assign(new Error('secret failure details'), { code: 'ECONNRESET' });
+      }
+      const binding = bind(task);
+      checkpoint({ binding, marker: '1' });
+      return { status: 'passed', binding, marker: '1' };
+    },
+    reconcile: verify,
+  });
+  const task = queue.enqueue(target('a'), { start: true });
+  const passed = await until(queue, task.id, 'passed');
+  assert.equal(passed.attempts, 5);
+  assert.equal(warnings.length, 4);
+  const serialized = JSON.stringify(warnings);
+  assert.match(serialized, /ECONNRESET/);
+  assert.ok(!serialized.includes('secret'));
+});

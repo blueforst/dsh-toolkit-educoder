@@ -1,6 +1,6 @@
 # DSH Toolkit & EduCoder · Linux 服务器版
 
-本仓库是 [blueforst/dsh-toolkit](https://github.com/blueforst/dsh-toolkit) 的独立派生项目，保留上游提交历史、许可证和原 Toolkit 软件包，并在此基础上新增 **`@forst/dsh-educoder`（当前 `0.2.0`）** 可选插件及隔离部署方案，提供头歌（EduCoder）多账号隔离、课程和作业选择、持久化任务队列以及基于 DSH 原生编码工具与工作区可自愈 CLI（`./cli/educoder.mjs`）的评测工作流。详细功能见 [EduCoder 插件说明](plugins/educoder/README.md)，安装与隔离验收见 [EduCoder 开发与公网部署](deploy/educoder/README.md)。
+本仓库是 [blueforst/dsh-toolkit](https://github.com/blueforst/dsh-toolkit) 的独立派生项目，保留上游提交历史、许可证和原 Toolkit 软件包，并在此基础上新增 **`@forst/dsh-educoder`（当前 `0.2.1`）** 可选插件及隔离部署方案，提供头歌（EduCoder）多账号隔离、课程和作业选择、持久化任务队列以及基于 DSH 原生编码工具与工作区可自愈 CLI（`./cli/educoder.mjs`）的评测工作流。详细功能见 [EduCoder 插件说明](plugins/educoder/README.md)，安装与隔离验收见 [EduCoder 开发与公网部署](deploy/educoder/README.md)。
 
 原 Toolkit 面向 Linux 服务器的 DSH 插件包：**服务器资源、OpenCode Go 月额度、Pi 会话费用**。另附 **Camoufox 指纹浏览器运行时**、**Linux 完整桌面与 Computer Use**及 **OpenCode Go 模型配置示例**。
 
@@ -26,7 +26,7 @@ Linux 桌面新增配方及真实截图坐标验收见 [桌面说明](integratio
 
 ```bash
 npm pack ./plugins/educoder --pack-destination dist
-dsh plugin --profile web add --ignore-scripts --save-exact "$PWD/dist/forst-dsh-educoder-0.2.0.tgz"
+dsh plugin --profile web add --ignore-scripts --save-exact "$PWD/dist/forst-dsh-educoder-0.2.1.tgz"
 ```
 
 ## 包含什么

@@ -21,14 +21,9 @@ export const NATIVE_CODING_TOOLS = Object.freeze([
   'job_kill',
 ]);
 
-const MAX_TEXT = 96_000;
-const MAX_STATE_BYTES = 1024 * 1024;
-const SESSION_REUSE_MS = 15 * 60 * 1000;
-const GO_SESSION_REQUEST_LIMIT = 16;
-const GO_REQUEST_MESSAGE_LIMIT = 64;
-const GO_NATIVE_SESSION_REQUEST_LIMIT = 128;
-const GO_NATIVE_REQUEST_MESSAGE_LIMIT = 256;
-const GO_REUSE_HISTORY_BYTES = 384 * 1024;
+const MAX_TEXT = 1_000_000;
+const MAX_STATE_BYTES = 16 * 1024 * 1024;
+const SESSION_REUSE_MS = 24 * 60 * 60 * 1000;
 const RESULT_CODES = {
   cancelled: 'agent_cancelled',
   timeout: 'agent_timeout',
@@ -222,12 +217,26 @@ function ensureShellEnvStore(ctx) {
   return store;
 }
 
-function integer(value, fallback, min, max) {
-  const result = value ?? fallback;
-  if (!Number.isSafeInteger(result) || result < min || result > max) {
+function optionalPositiveInt(value, max = Number.MAX_SAFE_INTEGER) {
+  if (value == null) return undefined;
+  if (!Number.isSafeInteger(value) || value < 1 || value > max) {
     throw new TypeError('EduCoder Agent 预算超出范围');
   }
-  return result;
+  return value;
+}
+
+function safeErrorSummary(error, redact) {
+  const name = typeof error?.name === 'string' && error.name ? error.name : 'Error';
+  const rawCode = error?.code ?? error?.cause?.code;
+  const code = typeof rawCode === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(rawCode) ? rawCode : undefined;
+  const rawMessage = typeof error?.message === 'string' ? error.message : '';
+  const sanitized = redact(defaultRedact(rawMessage))
+    .replace(/(https?:\/\/)[^/@\s]+@/gi, '$1[已脱敏]@')
+    .replace(/([?&][^=\s]+=)[^&\s]+/g, '$1[已脱敏]')
+    .replace(/[\r\n]+/g, ' ')
+    .trim()
+    .slice(0, 200);
+  return { name, ...(code ? { code } : {}), ...(sanitized ? { message: sanitized } : {}) };
 }
 
 function redacted(value, limit, redact) {
@@ -243,7 +252,7 @@ function defaultRedact(text) {
 }
 
 function allowedPaths(paths) {
-  if (!Array.isArray(paths) || paths.length > 128) throw new TypeError('Invalid EduCoder file list');
+  if (!Array.isArray(paths) || paths.length > 1024) throw new TypeError('Invalid EduCoder file list');
   return new Set(paths.map(path => {
     if (typeof path !== 'string' || path.length > 512 || isAbsolute(path) ||
         /[\\:\x00-\x1f]/.test(path) || path.split('/').some(part => !part || part === '.' || part === '..')) {
@@ -491,10 +500,10 @@ export function createAgentRunner(ctx, {
   const root = resolve(workspaceRoot);
   const defaultSharedRoot = sharedWorkspaceRoot ? resolve(sharedWorkspaceRoot) : join(root, 'shared');
   const extendedMode = Boolean(extended || nativeTools);
-  const stepLimit = integer(maxSteps, extendedMode ? 24 : 8, 1, 64);
-  const deadlineMs = integer(timeoutMs, extendedMode ? 480_000 : 120_000, 1, 1_800_000);
-  const requestTokens = integer(maxTokens, 4_096, 1, 64_000);
-  const totalLimit = integer(maxTotalTokens, extendedMode ? 400_000 : 48_000, 1, 10_000_000);
+  const stepLimit = optionalPositiveInt(maxSteps);
+  const deadlineMs = optionalPositiveInt(timeoutMs, 2 ** 31 - 1);
+  const requestTokens = optionalPositiveInt(maxTokens);
+  const totalLimit = optionalPositiveInt(maxTotalTokens);
   const allowedTools = new Set(NATIVE_CODING_TOOLS);
   let runtime;
 
@@ -510,6 +519,9 @@ export function createAgentRunner(ctx, {
     let usageKnown = true;
     let usedSteps = 0;
     let turnReason;
+    let lastTurnError;
+    let sessionFlushed = false;
+    let failureLogged = false;
     let revokeTools;
     let currentAgent;
     let resumed = false;
@@ -519,12 +531,28 @@ export function createAgentRunner(ctx, {
     let scopeKey;
     let phase = 'agent_setup_failed';
     const controller = new AbortController();
+    const effectiveRedact = value => redactSessionSecrets(redact(value), task.session ?? {});
+    function warnFailure(failurePhase, error) {
+      if (failureLogged || !ctx.logger?.warn) return;
+      failureLogged = true;
+      ctx.logger.warn('EduCoder Agent 执行失败。', {
+        taskId: task.taskId,
+        stageId: task.stageId,
+        sessionId,
+        phase: failurePhase,
+        resumed,
+        steps,
+        tokens,
+        turnReason,
+        ...(error ? { error: safeErrorSummary(error, effectiveRedact) } : {}),
+      });
+    }
     function stop(status) {
       outcome ??= status;
       controller.abort(new Error(RESULT_CODES[status]));
       handle?.agent.cancel({ kind: 'hook', reason: RESULT_CODES[status] });
     }
-    const timer = setTimeout(() => stop('timeout'), deadlineMs);
+    const timer = deadlineMs === undefined ? undefined : setTimeout(() => stop('timeout'), deadlineMs);
     const abort = () => stop('cancelled');
     task.signal?.addEventListener('abort', abort, { once: true });
     if (task.signal?.aborted) abort();
@@ -537,9 +565,13 @@ export function createAgentRunner(ctx, {
       const selection = model ? { provider, model } : ctx.agentDefaultModel.currentSelection();
       const shared = await experience;
       const sdk = await (runtime ??= runtimeLoader());
-      const effectiveRedact = value => redactSessionSecrets(redact(value), task.session);
       const instructions = redacted(task.instructions, MAX_TEXT, effectiveRedact);
-      const agentOptions = { ...selection, maxTokens: Math.min(requestTokens, totalLimit) };
+      const requestedMaxTokens = requestTokens !== undefined && totalLimit !== undefined
+        ? Math.min(requestTokens, totalLimit)
+        : requestTokens ?? totalLimit;
+      const agentOptions = requestedMaxTokens !== undefined
+        ? { ...selection, maxTokens: requestedMaxTokens }
+        : { ...selection };
 
       const targetWorkspace = shared?.root ?? defaultSharedRoot;
       await mkdir(targetWorkspace, { mode: 0o700, recursive: true });
@@ -594,10 +626,6 @@ export function createAgentRunner(ctx, {
       ])).digest('hex');
       const candidate = task.sessionResume;
       const age = Date.now() - candidate?.lastRequestAt;
-      const goNative = selection.provider === 'opencode-go-native';
-      const goRelay = goNative || selection.provider === 'opencode-go';
-      const goRequests = goNative ? GO_NATIVE_SESSION_REQUEST_LIMIT : GO_SESSION_REQUEST_LIMIT;
-      const goMessages = goNative ? GO_NATIVE_REQUEST_MESSAGE_LIMIT : GO_REQUEST_MESSAGE_LIMIT;
       const archived = id => ctx.workspaceRegistry?.archivedSessionIds.includes(id);
       const options = {
         signal,
@@ -623,13 +651,19 @@ export function createAgentRunner(ctx, {
           });
           agentCtx.on('agent/pre-step', async (_request, next) => {
             // 额度在下一模型步前检查。缺少用量的适配器至多执行一个未计量步骤。
-            if (signal.aborted || steps >= stepLimit || tokens >= totalLimit || !usageKnown) {
+            if (signal.aborted ||
+                (stepLimit !== undefined && steps >= stepLimit) ||
+                (totalLimit !== undefined && tokens >= totalLimit) ||
+                !usageKnown) {
               outcome ??= 'budget';
               return { kind: 'reject' };
             }
             return next();
           }, { prepend: true });
-          agentCtx.on('agent/request-error', async () => undefined, { prepend: true });
+          agentCtx.on('agent/request-error', async event => {
+            if (event?.error) lastTurnError = event.error;
+            return undefined;
+          }, { prepend: true });
           agentCtx.on('session/event', (session, event) => {
             if (session !== agent.session) return;
             if (event.type === 'step/start') steps++;
@@ -641,15 +675,19 @@ export function createAgentRunner(ctx, {
               if (count === undefined) usageKnown = false;
               else tokens += count;
             }
-            if (event.type === 'turn/end') turnReason = event.data.reason?.kind;
+            if (event.type === 'turn/end') {
+              turnReason = event.data.reason?.kind;
+              if (turnReason !== 'completed' && event.data.reason) {
+                lastTurnError ??= event.data.reason.error ?? event.data.reason;
+              }
+            }
           });
         },
       };
       let nextSessionId;
       const nextStage = Boolean(extendedMode && task.resumeFromPreviousStage);
       const sameContext = nextStage ? candidate?.scopeKey === scopeKey : candidate?.key === resumeKey;
-      if (sameContext && age >= 0 && age < SESSION_REUSE_MS &&
-          (!goRelay || candidate.requestCount + stepLimit <= goRequests)) {
+      if (sameContext && age >= 0 && age < SESSION_REUSE_MS) {
         const previousId = sdk.sessionId(candidate.sessionId);
         if (!archived(previousId) && !ctx.agents.get(previousId)) {
           try {
@@ -665,14 +703,6 @@ export function createAgentRunner(ctx, {
                     current.reasoningEffort !== selection.reasoningEffort ||
                     agent.inbox.nextTurn.length || agent.inbox.nextStep.length) {
                   throw new SessionCannotBeReused();
-                }
-                if (goRelay) {
-                  const history = agent.session.deriveMessages();
-                  // 给新一轮的模型输出和工具响应预留转发空间。
-                  if (history.length + 2 + (goNative ? 2 : 4) * stepLimit > goMessages ||
-                      Buffer.byteLength(JSON.stringify(history)) > GO_REUSE_HISTORY_BYTES) {
-                    throw new SessionCannotBeReused();
-                  }
                 }
                 await options.setup(agentCtx, agent);
               },
@@ -732,10 +762,10 @@ export function createAgentRunner(ctx, {
         sdk.setSandboxMode(handle.agent.session, 'workspace-write');
         sdk.setApprovalPolicy(handle.agent.session, 'never');
       }
-      const notes = shared && !resumed ? redacted(await shared.read(), 2400, effectiveRedact) : '';
+      const notes = shared && !resumed ? redacted(await shared.read(), 12_000, effectiveRedact) : '';
       const examples = newStatement && task.examples?.map(({ input, expected }) => ({
-        输入: input === undefined ? undefined : redacted(input, 500, effectiveRedact),
-        期望输出: expected === undefined ? undefined : redacted(expected, 500, effectiveRedact),
+        输入: input === undefined ? undefined : redacted(input, 4_000, effectiveRedact),
+        期望输出: expected === undefined ? undefined : redacted(expected, 4_000, effectiveRedact),
       }));
       const prompt = buildCliPrompt({
         task,
@@ -757,10 +787,16 @@ export function createAgentRunner(ctx, {
         source: { kind: 'dsh-educoder' },
       }));
       await handle.agent.whenIdle();
-      if (turnReason === 'max-tokens' || tokens > totalLimit) outcome ??= 'budget';
+      if (turnReason === 'max-tokens' || (totalLimit !== undefined && tokens > totalLimit)) outcome ??= 'budget';
       outcome ??= turnReason === 'completed' ? 'finished' : 'failed';
-    } catch {
+      if (outcome === 'failed') {
+        warnFailure(phase, lastTurnError);
+      }
+    } catch (error) {
       outcome ??= 'failed';
+      if (outcome === 'failed') {
+        warnFailure(phase, error);
+      }
     } finally {
       if (currentAgent) shellEnvStore?.agentEnvs.delete(currentAgent);
       revokeTools?.();
@@ -769,20 +805,30 @@ export function createAgentRunner(ctx, {
       if (handle) {
         try {
           await ctx.sessions.flush(handle.agent.session);
-        } catch {
+          sessionFlushed = true;
+        } catch (error) {
           phase = 'agent_session_flush_failed';
           if (outcome === 'finished') outcome = 'failed';
+          warnFailure(phase, error);
         }
         try {
           await handle.dispose();
-        } catch {
+        } catch (error) {
           phase = 'agent_dispose_failed';
           if (outcome === 'finished') outcome = 'failed';
+          warnFailure(phase, error);
         }
       }
     }
-    const sessionResume = outcome === 'finished' && usageKnown && lastRequestAt
-      ? { sessionId, key: resumeKey, ...(extendedMode ? { scopeKey } : {}), lastRequestAt, requestCount: requestCount + steps }
+    const resumableOutcome = outcome === 'finished' || outcome === 'budget' || outcome === 'timeout';
+    const sessionResume = resumableOutcome && sessionFlushed && usageKnown && lastRequestAt && sessionId
+      ? {
+        sessionId,
+        key: resumeKey,
+        ...(extendedMode ? { scopeKey } : {}),
+        lastRequestAt,
+        requestCount: Math.max(1, requestCount + steps),
+      }
       : undefined;
     return {
       sessionId, status: outcome, code: outcome === 'failed' ? phase : RESULT_CODES[outcome], steps, tokens, sessionResume,

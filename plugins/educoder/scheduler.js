@@ -4,12 +4,12 @@ import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 const VERSION = 1;
-const MAX_BATCH = 100;
-const MAX_COURSE_HOMEWORKS = 1000;
-const MAX_STAGE_CONTINUATIONS = 15;
-const MAX_EVENTS = 100;
-const MAX_RECONCILES = 5;
-const MAX_CONCURRENCY = 8;
+const MAX_BATCH = 1000;
+const MAX_COURSE_HOMEWORKS = 10_000;
+const MAX_STAGE_CONTINUATIONS = 1000;
+const MAX_EVENTS = 500;
+const MAX_RECONCILES = 20;
+const MAX_CONCURRENCY = 32;
 const ID = /^[\w.:-]{1,160}$/u;
 const MARKER = /^[\w.:/+@-]{0,160}$/u;
 const BINDING_KEYS = ['courseId', 'homeworkId', 'taskId', 'practiceId', 'remoteUserId', 'gameId', 'challengeId'];
@@ -252,13 +252,13 @@ function applyCheckpoint(task, changes) {
 }
 
 export function createScheduler({
-  file, worker, reconcile, concurrency = 2, maxAttempts = 3,
-  timeoutMs = 15 * 60 * 1000, retryDelayMs = 1000, automaticRetries = false,
+  file, worker, reconcile, concurrency = 2, maxAttempts = 12,
+  timeoutMs = null, retryDelayMs = 1000, automaticRetries = false, logger,
 } = {}) {
   if (typeof worker !== 'function' || typeof reconcile !== 'function') fail('invalid_input');
   numberBetween(concurrency, 1, MAX_CONCURRENCY);
-  numberBetween(maxAttempts, 1, 20);
-  numberBetween(timeoutMs, 1, 2 ** 31 - 1);
+  numberBetween(maxAttempts, 1, 1000);
+  if (timeoutMs !== null) numberBetween(timeoutMs, 1, 2 ** 31 - 1);
   numberBetween(retryDelayMs, 0, 60_000);
 
   const store = openStore(file, concurrency);
@@ -358,7 +358,7 @@ export function createScheduler({
   async function run(task, mode, controller) {
     const current = () => structuredClone(state.tasks[task.id]);
     let contextOpen = true;
-    const deadline = Date.now() + timeoutMs;
+    const deadline = timeoutMs === null ? Infinity : Date.now() + timeoutMs;
     const checkpoint = changes => {
       if (Date.now() >= deadline) controller.abort(new SchedulerError('timeout'));
       if (!contextOpen || !changes || typeof changes !== 'object' || controller.signal.aborted ||
@@ -379,7 +379,7 @@ export function createScheduler({
         return structuredClone(latest);
       });
     };
-    const timeout = setTimeout(() => controller.abort(new SchedulerError('timeout')), timeoutMs);
+    const timeout = timeoutMs === null ? undefined : setTimeout(() => controller.abort(new SchedulerError('timeout')), timeoutMs);
     let result;
     try {
       controller.signal.throwIfAborted();
@@ -388,6 +388,15 @@ export function createScheduler({
       if (!WORKER_RESULTS.has(result?.status)) fail('agent_failed');
     } catch (error) {
       const code = safeCode(error?.code);
+      if (code === 'agent_failed' && !(error instanceof SchedulerError)) {
+        const rawErrCode = typeof error?.code === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(error.code) ? error.code : undefined;
+        logger?.warn?.('EduCoder 调度任务异常。', {
+          taskId: task.id,
+          mode,
+          errorName: error?.name ?? 'Error',
+          ...(rawErrCode ? { errorCode: rawErrCode } : {}),
+        });
+      }
       result = { status: MANUAL_CODES.has(code) ? 'manual' : 'failed', code };
     } finally {
       contextOpen = false;
@@ -446,7 +455,7 @@ export function createScheduler({
         clearVerification(task);
       } else if (task.mutation && automaticRetries && task.mutation.phase === 'evaluate' &&
           task.reconcileAttempts < MAX_RECONCILES && ['verification_pending', 'unavailable', 'uncertain'].includes(code)) {
-        task.retryAt = new Date(Date.now() + retryDelayMs * 2 ** Math.max(0, task.reconcileAttempts - 1)).toISOString();
+        task.retryAt = new Date(Date.now() + retryDelayMs * 2 ** Math.min(Math.max(0, task.reconcileAttempts - 1), 5)).toISOString();
         queue(task, draft, at, 'verification_pending');
         return;
       } else if (task.mutation) {
@@ -475,7 +484,7 @@ export function createScheduler({
     if (automaticRetries && status === 'failed' && !task.mutation && stageRetries < maxAttempts - 1 &&
         ['agent_failed', 'verification_failed', 'timeout', 'budget', 'unavailable', 'verification_pending'].includes(code)) {
       task.stageRetries = stageRetries + 1;
-      task.retryAt = new Date(Date.now() + retryDelayMs * 2 ** stageRetries).toISOString();
+      task.retryAt = new Date(Date.now() + retryDelayMs * 2 ** Math.min(stageRetries, 5)).toISOString();
       queue(task, draft, at, code);
       return;
     }
