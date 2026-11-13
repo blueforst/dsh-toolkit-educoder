@@ -14,6 +14,7 @@ window.__ModuleLoader__.load({
     const problemLabels = {
       auth_required: '账号会话已失效，请重新登录。',
       invalid_credentials: '登录未通过，请检查账号和密码。',
+      tasks_disabled: '当前实例开放账号登录和课程查看，作业执行尚未启用。',
       live_disabled: '此实例未启用真实 EduCoder 提交。',
       next_stage: '已通过本关，准备读取下一关。',
       stage_limit: '已达到单次任务的关卡上限。',
@@ -181,7 +182,7 @@ window.__ModuleLoader__.load({
       return entry?.scope === scope && entry?.version === version ? entry : { items: [], loading: true };
     }
 
-    function Picker({ account, version, busy, batch, setBatch, allocate }) {
+    function Picker({ account, version, busy, batch, setBatch, allocate, tasksEnabled }) {
       const [courseId, setCourseId] = useState('');
       const [homeworkId, setHomeworkId] = useState('');
       const id = account && ['ready', 'unverified'].includes(account.status) ? account.id : '';
@@ -218,7 +219,7 @@ window.__ModuleLoader__.load({
               h('option', { value: '' }, homeworks.loading ? '正在读取作业…' : (homeworks.items.length ? '选择作业' : '暂无可用作业')),
               homeworks.items.map(item => h('option', { key: item.id, value: item.id }, homeworkLabel(item)))))),
           (courses.error || homeworks.error) && h('p', { role: 'alert', className: 'edu-error' }, courses.error || homeworks.error),
-          h('div', { className: 'edu-actions' },
+          tasksEnabled && h('div', { className: 'edu-actions' },
             h(Button, { primary: true, disabled: busy || !target, onClick: () => allocate([target], true) }, '启动此作业'),
             h(Button, {
               disabled: busy || !target || isInBatch,
@@ -230,7 +231,7 @@ window.__ModuleLoader__.load({
                   homeworkTitle: titleOf(homeworks.items, currentHomework),
                 }]),
             }, isInBatch ? '已加入批量' : '加入批量'))),
-        h('div', { className: 'edu-batch' },
+        tasksEnabled && h('div', { className: 'edu-batch' },
           h('h3', null, '批量分配'),
           batch.length === 0 && h('p', { className: 'edu-muted' }, '在每个账号下选择作业，再把它加入批量。'),
           batch.length > 0 && h(React.Fragment, null,
@@ -341,6 +342,8 @@ window.__ModuleLoader__.load({
       const [version, setVersion] = useState(0);
       const [batch, setBatch] = useState([]);
       const [concurrency, setConcurrency] = useState(null);
+      const [mode, setMode] = useState(null);
+      const [tasksEnabled, setTasksEnabled] = useState(false);
       const [busy, setBusy] = useState(false);
       const [error, setError] = useState('');
       const [stale, setStale] = useState(false);
@@ -359,6 +362,8 @@ window.__ModuleLoader__.load({
         setAccounts(accountList);
         setTasks(taskList);
         setConcurrency(settings.concurrency);
+        setMode(settings.mode);
+        setTasksEnabled(settings.tasksEnabled !== false);
         setStale(false);
         setLoaded(true);
       }
@@ -451,6 +456,8 @@ window.__ModuleLoader__.load({
               }),
             }, '刷新')),
           error && h('div', { role: 'alert', className: 'edu-notice edu-error' }, error),
+          mode === 'fixture' && h('p', { className: 'edu-notice' }, '当前为模拟环境，请使用测试账号。'),
+          mode === 'live' && !tasksEnabled && h('p', { className: 'edu-notice' }, '可绑定头歌账号并查看课程和作业。作业执行尚未启用。'),
           stale && h('div', { role: 'status', className: 'edu-notice' }, '数据暂未更新。可用「刷新」重新连接。'),
           !loaded ? (!stale && h('p', { role: 'status', className: 'edu-muted' }, '正在读取 EduCoder 数据…'))
             : h(React.Fragment, null,
@@ -479,8 +486,8 @@ window.__ModuleLoader__.load({
                     await readAll(signal);
                   }),
                 }),
-                h(Picker, { key: account?.id || 'no-account', account, version, busy, batch, setBatch, allocate })),
-              h(Queue, {
+                h(Picker, { key: account?.id || 'no-account', account, version, busy, batch, setBatch, allocate, tasksEnabled })),
+              (tasksEnabled || tasks.length > 0) && h(Queue, {
                 tasks, accounts, busy, concurrency, log, openSession, closeLog: () => setLog(null),
                 saveConcurrency: value => perform(async signal => {
                   const settings = await request('settings', { concurrency: value }, signal);

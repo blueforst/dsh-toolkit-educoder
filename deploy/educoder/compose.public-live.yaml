@@ -1,0 +1,25 @@
+# 与 compose.yaml、compose.credentials.yaml 叠加。公网 Nginx 代理到宿主回环端口。
+services:
+  dsh:
+    environment:
+      DSH_EDUCODER_READONLY_SETTINGS: "1"
+      DSH_EDUCODER_READONLY_TASKS: "1"
+    command:
+      - web
+      - --patch
+      - /opt/deepseek-harness/web.cordis.patch.yml
+      - --patch
+      - /opt/educoder-deployment/workspace.patch.yml
+      - --patch
+      - /opt/educoder-deployment/credential-boundary.patch.yml
+      - --patch
+      - /opt/educoder-deployment/public-settings.patch.yml
+      - --no-open
+      - --trusted-host
+      - ${DSH_EDUCODER_PUBLIC_HOST:?请设置 Nginx 公网主机名或 IP}
+    volumes:
+      - ./public-settings.patch.yml:/opt/educoder-deployment/public-settings.patch.yml:ro
+networks:
+  default:
+    external: true
+    name: ${DSH_EDUCODER_PUBLIC_NETWORK:?请指定已创建的 Docker 私有网络}

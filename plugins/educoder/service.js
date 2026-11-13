@@ -18,11 +18,18 @@ export function privateDirectory(root) {
   if (!stat.isDirectory() || (stat.mode & 0o077) !== 0 || realpathSync(root) !== resolve(root)) fail('invalid_state');
 }
 
-export function createService({ root, credentials, transport, runAgent, pollMs, pollAttempts, allowAccounts }) {
+export function createService({
+  root, credentials, transport, runAgent, pollMs, pollAttempts, allowAccounts,
+  allowTasks = true, mode = 'disabled',
+}) {
   privateDirectory(root);
   const allowed = typeof allowAccounts === 'function' ? allowAccounts : () => allowAccounts === true;
   function requireAccounts() {
     if (!allowed()) fail('live_disabled');
+  }
+  function requireTasks() {
+    requireAccounts();
+    if (!allowTasks) fail('tasks_disabled');
   }
   let accounts;
   const workers = createWorkers({
@@ -32,7 +39,7 @@ export function createService({ root, credentials, transport, runAgent, pollMs, 
     pollAttempts,
     accounts: {
       withSession: (...args) => {
-        requireAccounts();
+        requireTasks();
         return accounts.withSession(...args);
       },
     },
@@ -116,14 +123,18 @@ export function createService({ root, credentials, transport, runAgent, pollMs, 
         return task;
       }
       case 'allocate':
-        requireAccounts();
+        requireTasks();
         return allocate(input.targets, input.start ?? false);
       case 'control':
         if (!Object.hasOwn(controls, input.command)) fail('invalid_input');
-        if (['start', 'resume'].includes(input.command)) requireAccounts();
+        if (['start', 'resume'].includes(input.command)) requireTasks();
         return queue[controls[input.command]](input.taskIds);
       case 'settings':
-        return { concurrency: input.concurrency === undefined ? queue.getConcurrency() : queue.setConcurrency(input.concurrency) };
+        return {
+          concurrency: input.concurrency === undefined ? queue.getConcurrency() : queue.setConcurrency(input.concurrency),
+          mode,
+          tasksEnabled: allowTasks && allowed(),
+        };
       default: fail('invalid_input');
     }
   }

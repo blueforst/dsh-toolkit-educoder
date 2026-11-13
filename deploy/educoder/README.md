@@ -84,7 +84,7 @@ cd /opt/dsh-educoder-dev
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml config --quiet
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml up -d --wait --wait-timeout 60
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml exec -T dsh \
-  dsh plugin --profile web add --ignore-scripts --save-exact /opt/educoder-packages/forst-dsh-educoder-0.1.0.tgz
+  dsh plugin --profile web add --ignore-scripts --save-exact /opt/educoder-packages/forst-dsh-educoder-0.1.1.tgz
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml restart dsh
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml up -d --wait --wait-timeout 60
 sudo bash smoke-credential-boundary.sh
@@ -102,7 +102,11 @@ API 验收检查登录和 Origin 防护、宿主文件和上传入口阻断、�
 
 ### 真实账号开关
 
-真实账号默认关闭。叠加 `compose.credentials.yaml` 会启动独立的 `dsh-educoder-live` 项目，使用单独的凭据和工作区卷，以及宿主回环端口 `13081`。启用前需要在 `DSH_EDUCODER_LIVE_ENV` 指向的受保护文件中设置 `DSH_EDUCODER_LIVE_ACCOUNTS=1`，提供已授权的 `EDUCODER_SIGNING_ACCESS_KEY` 和 `EDUCODER_SIGNING_SECRET_KEY`。同一个环境文件也可引用已配置的 DSH 模型路由。专用实例启动后需要通过运行时的凭据隔离检查。用户只在通过 SSH 隧道打开的 DSH Web 面板输入账号凭据，并在发起真实任务前选定对应账号和作业。权限边界细节见 [凭据隔离](凭据隔离.md)。
+真实账号默认关闭。叠加 `compose.credentials.yaml` 会启动独立的 `dsh-educoder-live` 项目，使用单独的凭据和工作区卷，以及宿主回环端口 `13081`。启用前需要在 `DSH_EDUCODER_LIVE_ENV` 指向的受保护文件中设置 `DSH_EDUCODER_LIVE_ACCOUNTS=1`，提供已授权的 `EDUCODER_SIGNING_ACCESS_KEY` 和 `EDUCODER_SIGNING_SECRET_KEY`。同一个环境文件也可引用已配置的 DSH 模型路由。专用实例启动后需要通过运行时的凭据隔离检查。用户通过 SSH 隧道或带认证的 HTTPS 打开 DSH Web 面板后输入账号凭据。权限边界细节见 [凭据隔离](凭据隔离.md)。
+
+通过已启用 HTTPS 和账号验证的 Nginx 提供绑定入口时，再叠加 `compose.public-live.yaml`。设置 `DSH_EDUCODER_PUBLIC_HOST` 为公网入口的主机名或 IP，设置 `DSH_EDUCODER_PUBLIC_NETWORK` 为已创建的 Docker 私有网络。该组合开放账号绑定和课程作业查看，原生设置只读。Nginx 指向新实例的宿主回环端口，签发 DSH 浏览器 Cookie 的同步服务也需切换到新实例。真实实例使用独立卷，不能挂载模拟模型配置。
+
+若宿主无法直连 EduCoder，可按 [EduCoder 出站转发](educoder-connect/README.md) 配置只允许 EduCoder HTTPS 的私网转发。Go 额度可继续使用同一私有网桥上的宿主额度服务。切换前先在回环端口验证新实例。回滚时恢复旧反向代理配置和 Cookie 同步服务，保留新实例的数据卷。
 
 ## 重启、备份和回滚
 

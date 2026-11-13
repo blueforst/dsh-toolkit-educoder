@@ -22,6 +22,7 @@ const errors = {
   invalid_state: [409, '当前状态不允许该操作。'],
   retry_limit: [409, '已达到重试上限。'],
   live_disabled: [403, '当前部署仅开放隔离测试。'],
+  tasks_disabled: [403, '当前实例开放账号登录和课程查看，作业执行尚未启用。'],
 };
 
 function json(res, status, body, headers = {}) {
@@ -112,6 +113,8 @@ export function apply(ctx) {
         allowAccounts: () => dedicated && (fixture || (
           live && ctx.get('educoderCredentialBoundary', false)?.() === true
         )),
+        allowTasks: process.env.DSH_EDUCODER_READONLY_TASKS !== '1',
+        mode: fixture ? 'fixture' : live ? 'live' : 'disabled',
       });
       unregister = registerApi(ctx, service);
     } catch (error) {

@@ -9,10 +9,11 @@ const disabledDirectoryPicker = Object.freeze({
 
 const forbidden = [
   'terminalController', 'workspaceFiles', 'pluginManager',
-  'configEditor', 'settingsController', 'credentialsController', 'accountController',
+  'accountController',
   'dynamicCordisRunner', 'cordisInspect', 'workspaceChanges',
   'cuaAccess', 'ptcRuntime',
 ];
+const settingsServices = ['configEditor', 'settingsController', 'credentialsController'];
 
 const deniedRoutes = [
   '/api/file',
@@ -20,7 +21,7 @@ const deniedRoutes = [
   '/api/fileUploads/upload',
   '/api/commands/execute',
   '/api/agentPresets/select',
-  // 公开模拟实例可恢复原生设置浏览。设置写入、文件打开与模型探测仍拒绝。
+  // 恢复原生设置浏览时，仍在入口拒绝写入、打开文件和模型探测。
   ...['mutate', 'replace', 'update', 'openSettingsDocument'].map(action => '/api/settings/' + action),
   '/api/credentials/set',
   '/api/credentials/unset',
@@ -52,7 +53,9 @@ export function apply(ctx) {
   ctx.provide('directoryPicker', disabledDirectoryPicker);
   // 运行时每次使用前重新核对。独立部署的 Host 本身仍是可信管理员边界。
   ctx.provide('educoderCredentialBoundary', () => {
+    const readonlySettings = process.env.DSH_EDUCODER_READONLY_SETTINGS === '1';
     return ctx.get('directoryPicker')?.capability()?.kind === 'unavailable' &&
-      forbidden.every(key => ctx.get(key, false) === undefined);
+      forbidden.every(key => ctx.get(key, false) === undefined) &&
+      settingsServices.every(key => (ctx.get(key, false) !== undefined) === readonlySettings);
   });
 }

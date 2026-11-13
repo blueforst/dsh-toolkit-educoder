@@ -1,0 +1,32 @@
+[Unit]
+Description=DSH EduCoder TLS 连接转发
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/dsh-educoder-connect.py --bind 10.8.0.7 --port 18087 --peer 10.8.4.11
+Restart=on-failure
+RestartSec=3s
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+UMask=0077
+LimitNOFILE=128
+TasksMax=24
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

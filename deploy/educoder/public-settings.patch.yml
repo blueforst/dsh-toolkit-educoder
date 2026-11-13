@@ -1,7 +1,14 @@
-# 仅供独立的公开模拟实例。真实账号组合保持严格凭据隔离补丁。
+# 可选的原生只读设置。始终配合 credential-boundary.patch.yml 使用。
 - id: config-editor
   disabled: false
 - id: settings
   disabled: false
 - id: settings-controller
   disabled: false
+- id: ui-settings-general
+  config:
+    # 固定版 DSH 的提示确认依赖设置写入。只读实例在部署时固定当前版本。
+    welcomeNoticeVersion: "2026-09-28.1"
+- id: ui-settings-models
+  config:
+    credentialOnboarding: false

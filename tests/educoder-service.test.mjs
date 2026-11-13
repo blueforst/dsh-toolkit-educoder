@@ -10,7 +10,7 @@ const people = [
   { login: 'fixture-second-person', password: 'never-store-password-b', remoteId: '202', courseId: 'course-b', homeworkId: '22' },
 ];
 
-function setup(t, { allowAccounts = true } = {}) {
+function setup(t, { allowAccounts = true, allowTasks = true, mode = 'disabled' } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-educoder-service-')));
   const stored = new Map();
   const state = new Map();
@@ -53,7 +53,7 @@ function setup(t, { allowAccounts = true } = {}) {
   };
   let service;
   const open = () => createService({
-    root, credentials, transport, allowAccounts,
+    root, credentials, transport, allowAccounts, allowTasks, mode,
     runAgent: async () => assert.fail('此用例不应启动 Agent'),
   });
   service = open();
@@ -150,5 +150,17 @@ test('禁用真实账号时认证和运行请求在访问平台之前被拒绝',
   assert.deepEqual(authAttempts, []);
   assert.equal(stored.size, 0);
   assert.deepEqual(await api('accounts'), []);
+  assert.deepEqual(await api('tasks'), []);
+});
+
+test('真实账号的只读实例允许登录和目录读取，拒绝分配和启动作业', async t => {
+  const { api } = setup(t, { allowTasks: false, mode: 'live' });
+  const person = people[0];
+  const account = await bind(api, person);
+  assert.equal((await api('courses', { accountId: account.id })).length, 1);
+  assert.equal((await api('homeworks', { accountId: account.id, courseId: person.courseId })).length, 1);
+  assert.deepEqual(await api('settings'), { concurrency: 2, mode: 'live', tasksEnabled: false });
+  await assert.rejects(api('allocate', { targets: [target(account, person)], start: true }), { code: 'tasks_disabled' });
+  await assert.rejects(api('control', { command: 'resume', taskIds: [] }), { code: 'tasks_disabled' });
   assert.deepEqual(await api('tasks'), []);
 });
