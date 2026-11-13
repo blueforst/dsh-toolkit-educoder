@@ -18,6 +18,8 @@ const deniedRoutes = [
   '/api/file',
   '/api/session/uploadFileBinary',
   '/api/fileUploads/upload',
+  '/api/commands/execute',
+  '/api/agentPresets/select',
   ...['pick', 'list', 'createDirectory'].map(action => '/api/directoryPicker/' + action),
   ...[
     'create', 'fork', 'prompt', 'updateQueue', 'selectModel', 'initializeDefaultModel',

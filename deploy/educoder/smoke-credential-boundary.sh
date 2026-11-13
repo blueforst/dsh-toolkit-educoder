@@ -51,6 +51,8 @@ try {
     ['manual-session', '/api/session/create', 'POST', authenticated, 403],
     ['manual-prompt', '/api/session/prompt', 'POST', authenticated, 403],
     ['manual-cancel', '/api/session/cancel', 'POST', authenticated, 403],
+    ['manual-command', '/api/commands/execute', 'POST', authenticated, 403],
+    ['manual-preset-switch', '/api/agentPresets/select', 'POST', authenticated, 403],
   ]) {
     stage = name;
     const response = await fetchChecked(path, { method, headers });

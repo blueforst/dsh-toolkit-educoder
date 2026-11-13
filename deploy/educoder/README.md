@@ -96,7 +96,7 @@ API 验收检查登录和 Origin 防护、宿主文件和上传入口阻断、�
 
 ### 真实账号开关
 
-真实账号默认关闭。专用实例加载 `compose.credentials.yaml` 后，仍须通过运行时的凭据隔离检查，并由管理员在 `DSH_EDUCODER_LIVE_ENV` 指向的受保护文件中明确设置 `DSH_EDUCODER_LIVE_ACCOUNTS=1`，提供 `EDUCODER_SIGNING_ACCESS_KEY` 和 `EDUCODER_SIGNING_SECRET_KEY`。管理员需要使用已授权的签名配置，用户仅通过受保护的 DSH Web 面板输入 EduCoder 账号凭据。真实提交前应由用户选定并确认对应账号和作业。当前验收使用模拟账号。权限边界细节见 [凭据隔离](凭据隔离.md)。
+真实账号默认关闭。叠加 `compose.credentials.yaml` 会启动独立的 `dsh-educoder-live` 项目，使用单独的凭据和工作区卷，以及宿主回环端口 `13081`。启用前需要在 `DSH_EDUCODER_LIVE_ENV` 指向的受保护文件中设置 `DSH_EDUCODER_LIVE_ACCOUNTS=1`，提供已授权的 `EDUCODER_SIGNING_ACCESS_KEY` 和 `EDUCODER_SIGNING_SECRET_KEY`。同一个环境文件也可引用已配置的 DSH 模型路由。专用实例启动后需要通过运行时的凭据隔离检查。用户只在通过 SSH 隧道打开的 DSH Web 面板输入账号凭据，并在发起真实任务前选定对应账号和作业。当前验收使用模拟账号。权限边界细节见 [凭据隔离](凭据隔离.md)。
 
 ## 重启、备份和回滚
 
