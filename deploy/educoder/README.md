@@ -85,7 +85,7 @@ cd /opt/dsh-educoder-dev
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml config --quiet
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml up -d --wait --wait-timeout 60
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml exec -T dsh \
-  dsh plugin --profile web add --ignore-scripts --save-exact /opt/educoder-packages/forst-dsh-educoder-0.2.1.tgz
+  dsh plugin --profile web add --ignore-scripts --save-exact /opt/educoder-packages/forst-dsh-educoder-0.2.2.tgz
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml restart dsh
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml up -d --wait --wait-timeout 60
 sudo bash smoke-credential-boundary.sh
@@ -112,7 +112,7 @@ API 验收检查登录和 Origin 防护、宿主文件和上传入口阻断、�
 
 ### 启用真实作业执行
 
-安装 EduCoder `0.2.1`，再将 `compose.live-tasks.yaml` 放在现有 Compose 文件之后。默认固定使用 `deepseek-official/deepseek-flash`。使用此路由时，专用实例必须能访问 DeepSeek API，且由受保护的环境文件注入 `DEEPSEEK_API_KEY`。作业会话通过 `tools.guard` 与能力作用域隔离仅挂载 DSH 原生编码工具（`bash`/`pwsh`、`read`、`read_image`、`write`、`edit`、`glob`、`grep`、`job_*`），所有平台交互通过工作区可自愈 CLI（`./cli/educoder.mjs`）执行，不注入 `educoder_*` tool schema，也不挂载 `plan-mode`/`subagent`/`schedule`/`goal`/`skill`/`web_search`/`todo_write`。每个运行中的 Agent 仅通过 `ctx.shellEnv` 临时获取其绑定的内存环境变量并在 `workspace-write` + `never` 下运行。
+安装 EduCoder `0.2.2`，再将 `compose.live-tasks.yaml` 放在现有 Compose 文件之后。默认固定使用 `deepseek-official/deepseek-flash`。使用此路由时，专用实例必须能访问 DeepSeek API，且由受保护的环境文件注入 `DEEPSEEK_API_KEY`。作业会话通过 `tools.guard` 与能力作用域隔离仅挂载 DSH 原生编码工具（`bash`/`pwsh`、`read`、`read_image`、`write`、`edit`、`glob`、`grep`、`job_*`），所有平台交互通过工作区可自愈 CLI（`./cli/educoder.mjs`）执行，不注入 `educoder_*` tool schema，也不挂载 `plan-mode`/`subagent`/`schedule`/`goal`/`skill`/`web_search`/`todo_write`。每个运行中的 Agent 仅通过 `ctx.shellEnv` 临时获取其绑定的内存环境变量并在 `workspace-write` + `never` 下运行。
 
 若容器只能访问宿主网桥，可安装 [OpenCode Go 模型转发](go-model-relay/README.md)。然后将 `compose.public-go-tasks.yaml` 放在最末（使用允许原生编码工具与更大上下文的 `opencode-go-native` 路由）。该文件从 `/etc/dsh-secrets/educoder-go-model.env` 读入 `DSH_GO_MODEL_TOKEN`；可用 `DSH_EDUCODER_GO_TOKEN_ENV` 指定其他受保护的环境文件。使用与原实例相同的 Compose 项目名和环境参数。若该项目由 systemd 管理，把同一文件顺序写入启动配置。
 
@@ -127,7 +127,7 @@ sudo docker compose -f compose.yaml -f compose.credentials.yaml -f compose.publi
 
 启用 `DSH_EDUCODER_BROWSER_INSPECTION=1` 且满足网页查看条件时，插件允许运行 `node "$DSH_EDUCODER_CLI" browser [--screenshot ...]` 无拦截查看网页文本与截图（不提供浏览器页面点击/操作工具）；镜像需要内置 Chromium 与 Playwright，并能通过现有出站代理访问头歌网页和静态资源。图形界面的点击和答题仍需人工操作。
 
-代码题中的参考图通过 DSH 原生图片附件送给模型（超过 4 张参考图时仍附带前 4 张可用图片，并允许按需借助只读浏览器检查补充确认）。使用能接收图片的模型路由，并允许容器读取头歌附件及固定的 `prod-attachments.oss-accelerate.aliyuncs.com` 附件域名。容器可直连附件域名时，把它加入 `NO_PROXY`；否则按 [私网连接转发](educoder-connect/README.md) 更新代理。若题图下载失败或模型不支持图片，任务停在人工处理，避免仅凭文字提交。
+代码题中的参考图通过 DSH 原生图片附件送给模型（超过 16 张参考图时仍附带前 16 张可用图片，并允许按需借助只读浏览器检查补充确认）。使用能接收图片的模型路由，并允许容器读取头歌附件及固定的 `prod-attachments.oss-accelerate.aliyuncs.com` 附件域名。容器可直连附件域名时，把它加入 `NO_PROXY`；否则按 [私网连接转发](educoder-connect/README.md) 更新代理。若题图全部下载失败或模型不支持图片，任务停在人工处理，避免仅凭文字提交。
 
 公网侧边栏的「浏览器桌面」使用当前镜像内置的 Chromium 和 Openbox。启用时，把 `compose.public-desktop.yaml` 加到现有 Compose 参数最后，并在现有 HTTPS `server` 中加入 [noVNC 反代配置](public-desktop.nginx.conf)。静态资源和 WebSocket 共用公网登录。原生 Browser Use 连接同一个 Chromium。公网反代的上传大小可按 [原生附件配置](public-uploads.nginx.conf) 设置。自定义回环端口时，同步更新 Nginx 的目标端口。
 

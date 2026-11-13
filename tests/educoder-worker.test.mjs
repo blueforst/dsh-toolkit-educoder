@@ -591,6 +591,23 @@ test('仅在不支持接口或题面缺图时向 Agent 启用浏览器网页查�
   assert.equal(overflowBrowser, true);
 });
 
+test('题面部分缺图但无浏览器能力时仍允许启动 Agent 而不在 worker 前置拦截', { timeout: 8000 }, async t => {
+  const stage = exercise('a', 1, { imagesUnavailable: true });
+  let ran = false;
+  const { open } = fixture(t, [stage], async run => {
+    ran = true;
+    assert.equal(run.inspectBrowser, undefined);
+    await run.saveFile('src/main.py', 'print(1)', run.signal);
+    await run.evaluate(run.signal);
+    return { status: 'finished' };
+  });
+  const queue = open();
+  const task = queue.enqueue(scopes.a, { start: true });
+  const passed = await expectState(queue, task.id, 'passed');
+  assert.equal(passed.status, 'passed');
+  assert.equal(ran, true);
+});
+
 test('CLI 模式通过平台接口直接保存并触发评测时，worker 能接收上下文、轮询在途评测并识别失败或通过', { timeout: 8000 }, async t => {
   const stagePassed = exercise('a', 1);
   const stageFailed = exercise('b', 1);

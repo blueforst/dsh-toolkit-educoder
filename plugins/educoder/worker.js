@@ -142,7 +142,6 @@ export function createWorkers({ transport, accounts, runAgent, inspectBrowser, e
           const unsupported = remote.kind === 'manual' ? 'manual_required' :
             remote.kind === 'terminal' && !remote.terminalAvailable ? 'terminal_unavailable' : null;
           if (unsupported && !inspectBrowser) return { status: 'manual', code: unsupported };
-          if (remote.imagesUnavailable && !inspectBrowser) return { status: 'manual', code: 'image_unavailable' };
           let codeProof;
           let terminalProof;
           let lastEvaluation;

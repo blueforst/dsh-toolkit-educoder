@@ -4,9 +4,11 @@ import { requireDshModule } from './dsh-require.mjs';
 
 // 头歌 WebSSH 握手参照 educoder-cli 固定版本的 terminal.py。
 const origin = 'https://www.educoder.net';
-const maxCommandBytes = 8_192;
-const maxOutputChars = 16_000;
-const maxFrameBytes = 1024 * 1024;
+const maxCommandBytes = 64 * 1024;
+const maxOutputChars = 256 * 1024;
+const maxFrameBytes = 4 * 1024 * 1024;
+const defaultConnectTimeoutMs = 30_000;
+const defaultTimeoutMs = 600_000;
 const recordStart = '\x1e';
 const recordEnd = '\x1f';
 
@@ -52,6 +54,8 @@ function createSocketConnector(proxyUrl) {
 
 export function createTerminalRunner({
   proxyUrl,
+  connectTimeoutMs = defaultConnectTimeoutMs,
+  timeoutMs = defaultTimeoutMs,
   openSocket = createSocketConnector(proxyUrl),
 } = {}) {
   return async function runTerminal({ endpoint, host, port, username, password, command, signal }) {
@@ -177,8 +181,8 @@ export function createTerminalRunner({
         finish(null, { exitCode: Number(status), output: output + (truncated ? '\n[终端输出已截断]' : '') });
       }
 
-      const connectDeadline = setTimeout(() => finish(new TerminalNotReadyError()), 12_000);
-      const deadline = setTimeout(() => finish(new Error('头歌终端执行超时。')), 90_000);
+      const connectDeadline = setTimeout(() => finish(new TerminalNotReadyError()), connectTimeoutMs);
+      const deadline = setTimeout(() => finish(new Error('头歌终端执行超时。')), timeoutMs);
       socket.addEventListener('open', onOpen);
       socket.addEventListener('message', onMessage);
       socket.addEventListener('close', disconnected);

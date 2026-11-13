@@ -27,8 +27,10 @@ const errors = {
   retry_limit: [409, '已达到重试上限。'],
   live_disabled: [403, '当前部署仅开放隔离测试。'],
   tasks_disabled: [403, '当前实例开放账号登录和课程查看，作业执行尚未启用。'],
-  course_limit: [409, '该课程作业超过一键通关的 1000 项上限。'],
+  course_limit: [409, '该课程作业超过一键通关的 10000 项上限。'],
 };
+
+const MAX_API_BODY_BYTES = 512 * 1024;
 
 function json(res, status, body, headers = {}) {
   const text = JSON.stringify(body);
@@ -51,7 +53,7 @@ async function body(req) {
   const chunks = [];
   for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     bytes += chunk.length;
-    if (bytes > 32768) throw Object.assign(new Error('请求过大。'), { code: 'invalid_input' });
+    if (bytes > MAX_API_BODY_BYTES) throw Object.assign(new Error('请求过大。'), { code: 'invalid_input' });
     chunks.push(chunk);
   }
   try {
@@ -76,15 +78,24 @@ export function registerApi(ctx, service) {
         return;
       }
       if (!/^application\/json(?:\s*;|$)/iu.test(req.headers['content-type'] ?? '') ||
-          Number(req.headers['content-length']) > 32768) {
+          Number(req.headers['content-length']) > MAX_API_BODY_BYTES) {
         reject(res, 400, 'invalid_input', '需要 JSON 请求。');
         return;
       }
+      let input;
       try {
-        const result = await service.execute(await body(req));
+        input = await body(req);
+        const result = await service.execute(input);
         json(res, 200, { ok: true, data: result });
       } catch (error) {
         const value = Object.hasOwn(errors, error?.code) ? errors[error.code] : undefined;
+        if (!value) {
+          ctx.logger?.warn?.('EduCoder API 请求未完成。', {
+            action: typeof input?.action === 'string' ? input.action : undefined,
+            errorName: error?.name ?? 'Error',
+            errorCode: typeof error?.code === 'string' ? error.code : undefined,
+          });
+        }
         const [status, message] = value ?? [500, 'EduCoder 操作未完成。'];
         reject(res, status, value ? error.code : 'agent_failed', message);
       }
@@ -121,8 +132,12 @@ export function apply(ctx) {
       const sharedWorkspaceRoot = process.env.DSH_EDUCODER_WORKSPACE_DIR || join(root, 'workspace');
       const experience = dedicated && (live || process.env.DSH_EDUCODER_WORKSPACE_DIR) ? createExperience({
         root: sharedWorkspaceRoot, workspaceRegistry: ctx.workspaceRegistry,
-      }).catch(() => {
-        ctx.logger.warn('EduCoder 工作区初始化失败。');
+      }).catch(error => {
+        ctx.logger.warn('EduCoder 工作区初始化失败。', {
+          errorName: error?.name ?? 'Error',
+          errorCode: typeof error?.code === 'string' ? error.code : undefined,
+          message: String(error?.message ?? '').replace(/[\r\n]+/g, ' ').slice(0, 300),
+        });
         return undefined;
       }) : undefined;
       const runAgent = createAgentRunner(ctx, {

@@ -165,9 +165,9 @@ async function mountNativeCodingTools(agentCtx, sdk, agent) {
       mountCompact(sdk.nativePlugins.compactionBasic);
     }
     mountCompact(sdk.nativePlugins.toolResultPruner, {
-      thresholdChars: 8192,
-      headChars: 4096,
-      tailChars: 1024,
+      thresholdChars: 262_144,
+      headChars: 131_072,
+      tailChars: 32_768,
     });
   }
 
@@ -235,7 +235,7 @@ function safeErrorSummary(error, redact) {
     .replace(/([?&][^=\s]+=)[^&\s]+/g, '$1[已脱敏]')
     .replace(/[\r\n]+/g, ' ')
     .trim()
-    .slice(0, 200);
+    .slice(0, 500);
   return { name, ...(code ? { code } : {}), ...(sanitized ? { message: sanitized } : {}) };
 }
 
@@ -516,8 +516,6 @@ export function createAgentRunner(ctx, {
     let outcome;
     let steps = 0;
     let tokens = 0;
-    let usageKnown = true;
-    let usedSteps = 0;
     let turnReason;
     let lastTurnError;
     let sessionFlushed = false;
@@ -650,11 +648,9 @@ export function createAgentRunner(ctx, {
             return '此工具仅供当前 EduCoder 关卡会话使用。';
           });
           agentCtx.on('agent/pre-step', async (_request, next) => {
-            // 额度在下一模型步前检查。缺少用量的适配器至多执行一个未计量步骤。
             if (signal.aborted ||
                 (stepLimit !== undefined && steps >= stepLimit) ||
-                (totalLimit !== undefined && tokens >= totalLimit) ||
-                !usageKnown) {
+                (totalLimit !== undefined && tokens >= totalLimit)) {
               outcome ??= 'budget';
               return { kind: 'reject' };
             }
@@ -667,13 +663,10 @@ export function createAgentRunner(ctx, {
           agentCtx.on('session/event', (session, event) => {
             if (session !== agent.session) return;
             if (event.type === 'step/start') steps++;
-            if (event.type === 'step/end' && usedSteps < steps) usageKnown = false;
             if (event.type === 'assistant/message') {
-              usedSteps = steps;
               lastRequestAt = Date.now();
               const count = measuredTokens(event.data.usage);
-              if (count === undefined) usageKnown = false;
-              else tokens += count;
+              if (count !== undefined) tokens += count;
             }
             if (event.type === 'turn/end') {
               turnReason = event.data.reason?.kind;
@@ -697,12 +690,17 @@ export function createAgentRunner(ctx, {
               async setup(agentCtx, agent) {
                 const { cwd } = agent.session.header;
                 const current = agent.model.current();
-                if (archived(previousId) || !cwd || cwd !== cwdCanonical ||
-                    (shared && !shared.workspace.sessionIds.includes(previousId)) ||
-                    current?.provider !== selection.provider || current.model !== selection.model ||
-                    current.reasoningEffort !== selection.reasoningEffort ||
-                    agent.inbox.nextTurn.length || agent.inbox.nextStep.length) {
-                  throw new SessionCannotBeReused();
+                if (archived(previousId)) throw new SessionCannotBeReused('archived');
+                if (!cwd || cwd !== cwdCanonical) throw new SessionCannotBeReused('cwd_mismatch');
+                if (shared && !shared.workspace.sessionIds.includes(previousId)) {
+                  throw new SessionCannotBeReused('workspace_missing_session');
+                }
+                if (current?.provider !== selection.provider || current.model !== selection.model ||
+                    current.reasoningEffort !== selection.reasoningEffort) {
+                  throw new SessionCannotBeReused('model_changed');
+                }
+                if (agent.inbox.nextTurn.length || agent.inbox.nextStep.length) {
+                  throw new SessionCannotBeReused('inbox_pending');
                 }
                 await options.setup(agentCtx, agent);
               },
@@ -714,6 +712,12 @@ export function createAgentRunner(ctx, {
             const missing = sdk.sessionNotFound && error instanceof sdk.sessionNotFound;
             const owned = sdk.sessionOwned && error instanceof sdk.sessionOwned;
             if (signal.aborted || (!missing && !owned && !(error instanceof SessionCannotBeReused))) throw error;
+            ctx.logger?.warn?.('EduCoder 无法复用既有会话，将新建会话。', {
+              taskId: task.taskId,
+              stageId: task.stageId,
+              sessionId: String(previousId),
+              error: safeErrorSummary(error, effectiveRedact),
+            });
           }
         }
       }
@@ -730,9 +734,11 @@ export function createAgentRunner(ctx, {
           }
           const images = await task.loadImages(signal);
           signal.throwIfAborted();
-          if (images.length !== task.imageCount) throw new Error('题面图片不完整。');
+          if (!images.length) throw new Error('题面图片不完整。');
+          if (images.length < task.imageCount) imagesMissing = true;
           const refs = await ctx.attachments.saveImages(images);
-          if (refs.length !== task.imageCount) throw new Error('题面图片不完整。');
+          if (!refs.length) throw new Error('题面图片不完整。');
+          if (refs.length < task.imageCount) imagesMissing = true;
           imageBlocks = refs.map(attachment => ({ type: 'image', attachment }));
         } catch (error) {
           signal.throwIfAborted();
@@ -821,7 +827,7 @@ export function createAgentRunner(ctx, {
       }
     }
     const resumableOutcome = outcome === 'finished' || outcome === 'budget' || outcome === 'timeout';
-    const sessionResume = resumableOutcome && sessionFlushed && usageKnown && lastRequestAt && sessionId
+    const sessionResume = resumableOutcome && sessionFlushed && lastRequestAt && sessionId
       ? {
         sessionId,
         key: resumeKey,

@@ -57,3 +57,18 @@ test('拒绝下一跳、非图片响应和无 Content-Length 的超限下载', a
   await assert.rejects(fetchStatementImage(async () => new Response('html', { headers: { 'content-type': 'text/html' } }), image, 10));
   await assert.rejects(fetchStatementImage(async () => new Response('too large', { headers: { 'content-type': 'image/png' } }), image, 4));
 });
+
+test('接受 image/jpg 与 application/octet-stream 响应类型及更高单图上限', async () => {
+  const jpgImage = statementImages('![图](/api/attachments/FigureJpg?type=image/jpeg)', origin).images[0];
+  const bytes = Buffer.alloc(600 * 1024, 0x2a);
+  const jpgResp = await fetchStatementImage(
+    async () => new Response(bytes, { headers: { 'content-type': 'image/jpg' } }),
+    jpgImage,
+  );
+  assert.equal(jpgResp.byteLength, bytes.byteLength);
+  const binResp = await fetchStatementImage(
+    async () => new Response(bytes, { headers: { 'content-type': 'application/octet-stream' } }),
+    image,
+  );
+  assert.equal(binResp.byteLength, bytes.byteLength);
+});

@@ -88,8 +88,16 @@ function fixture({ terminalRunner } = {}) {
       if (path === '/api/courses/' + identity.course + '/homework_commons.json') {
         if (modes.has('large course')) {
           const page = Number(url.searchParams.get('page'));
-          const offset = page === 21 && modes.has('repeat final page') ? 950 : (page - 1) * 50;
-          const size = page <= 20 || modes.has('repeat final page') ? 50 : 1;
+          const size = page <= 20 ? 50 : page === 21 ? 1 : 0;
+          return Response.json({ homeworks: Array.from({ length: size }, (_, i) => ({
+            homework_id: (page - 1) * 50 + i + 1,
+            name: '模拟作业',
+          })) });
+        }
+        if (modes.has('huge course')) {
+          const page = Number(url.searchParams.get('page'));
+          const offset = page === 201 && modes.has('repeat final page') ? 9950 : (page - 1) * 50;
+          const size = page <= 200 || modes.has('repeat final page') ? 50 : 1;
           return Response.json({ homeworks: Array.from({ length: size }, (_, i) => ({
             homework_id: offset + i + 1,
             name: '模拟作业',
@@ -135,7 +143,7 @@ function fixture({ terminalRunner } = {}) {
             id: 700 + step,
             subject: 'Example code task',
             description: modes.has('overflow images')
-              ? [1, 2, 3, 4, 5].map(i => `![fig${i}](/api/attachments/Fig${i}?type=image/png)`).join(' ')
+              ? Array.from({ length: 18 }, (_, idx) => `![fig${idx + 1}](/api/attachments/Fig${idx + 1}?type=image/png)`).join(' ')
               : undefined,
             task_pass: '<p>Write a program.</p>',
             path: modes.has('traversal') ? '../etc/passwd' : 'src/main & test.py；lib/helper.py;',
@@ -147,7 +155,9 @@ function fixture({ terminalRunner } = {}) {
           prev_game: step === 2 ? 'game-' + owner + '-1' : null,
           test_sets: [
             { is_public: false, input: 'hidden input', output: 'hidden fixture' },
-            { is_public: true, result: false, input: '23\n', output: 'expected output', actual_output: 'actual output' },
+            modes.has('long sample')
+              ? { is_public: true, result: false, input: 'I'.repeat(2000), output: 'O'.repeat(2000), actual_output: 'A'.repeat(2000) }
+              : { is_public: true, result: false, input: '23\n', output: 'expected output', actual_output: 'actual output' },
             ...(modes.has('sample visibility') ? [
               { is_public: true, is_invisible: true, input: 'hidden example' },
               { is_public: true, input_visible: false, input: 'hidden public input',
@@ -238,15 +248,21 @@ function errorCode(code) {
     !/fixture|secret|fake-pass/.test(error.message) && error.cause === undefined
 }
 
-test('一键通关读取完整目录，发现超过上限的额外作业时拒绝返回部分目录', async () => {
+test('一键通关支持超过一千份作业的大课程，并仅在超出万项上限且未完整结束时拒绝部分目录', async () => {
   const { transport, calls, modes } = fixture();
   const a = await login(transport, 'A');
   modes.add('large course');
-  assert.equal((await transport.homeworks(a, target('A').courseId)).length, 1000);
-  assert.equal(calls.some(call => call.path.endsWith('/homework_commons.json') && call.query.page === '21'), false);
+  assert.equal((await transport.homeworks(a, target('A').courseId)).length, 1001);
+  assert.equal((await transport.homeworks(a, target('A').courseId, { requireComplete: true })).length, 1001);
+
+  modes.delete('large course');
+  modes.add('huge course');
+  calls.length = 0;
+  assert.equal((await transport.homeworks(a, target('A').courseId)).length, 10000);
+  assert.equal(calls.some(call => call.path.endsWith('/homework_commons.json') && call.query.page === '201'), false);
   await assert.rejects(transport.homeworks(a, target('A').courseId, { requireComplete: true }), errorCode('course_limit'));
   modes.add('repeat final page');
-  assert.equal((await transport.homeworks(a, target('A').courseId, { requireComplete: true })).length, 1000);
+  assert.equal((await transport.homeworks(a, target('A').courseId, { requireComplete: true })).length, 10000);
 });
 
 test('native login, status and discovery maintain isolated signed session contexts', async () => {
@@ -566,14 +582,44 @@ test('aborting a read or pending write stops transport without claiming a sent w
   assert.equal(stored.size, 1)
 })
 
-test('题面图片超过上限时仍保留并下载前四张有效附图', async () => {
+test('题面图片超过上限时仍保留并下载前十六张有效附图', async () => {
   const { transport, modes } = fixture()
   modes.add('overflow images')
   const a = await login(transport, 'A')
   const task = await transport.inspect(a, target('A'))
-  assert.equal(task.imageCount, 4)
+  assert.equal(task.imageCount, 16)
   assert.equal(task.imagesUnavailable, true)
   const loaded = await transport.readStatementImages(task)
-  assert.equal(loaded.length, 4)
-  assert.deepEqual(loaded.map(img => img.name), ['参考图 1', '参考图 2', '参考图 3', '参考图 4'])
+  assert.equal(loaded.length, 16)
+  assert.deepEqual(
+    loaded.map(img => img.name),
+    Array.from({ length: 16 }, (_, idx) => `参考图 ${idx + 1}`),
+  )
+})
+
+test('代码中的登录名 zzud 不触发脱敏拦截，非零终端退出仍可提交评测，长公开样例完整保留', async () => {
+  const { transport, calls, modes, stored } = fixture({
+    terminalRunner: async ({ command }) => ({ exitCode: 1, output: `ran ${command} with non-zero` }),
+  })
+  const a = await login(transport, 'A')
+  modes.add('long sample')
+  modes.add('read saved file')
+  const task = await transport.inspect(a, target('A'))
+  assert.equal(task.feedback.publicTests[0].input.length, 2000)
+  assert.equal(task.feedback.publicTests[0].expected.length, 2000)
+  assert.equal(task.feedback.publicTests[0].actual.length, 2000)
+
+  const codeWithUsername = `# author ${fakeSecrets.A.login}\nprint("${a.zzud}")\n`
+  await transport.saveFile(a, task.binding, task.paths[0], codeWithUsername)
+  assert.equal(stored.get('A/' + task.paths[0]), codeWithUsername)
+  assert.equal(await transport.readFile(a, task.binding, task.paths[0]), codeWithUsername)
+
+  modes.delete('read saved file')
+  modes.add('terminal')
+  const termTask = await transport.inspect(a, target('A'))
+  const termRes = await transport.runTerminal(a, termTask.binding, 'make test')
+  assert.equal(termRes.exitCode, 1)
+  assert.deepEqual(termRes.proof, { kind: 'terminal' })
+  await transport.evaluate(a, termTask.binding, termRes.proof)
+  assert.equal(calls.filter(call => call.path.endsWith('/game_build.json')).at(-1).body.tab_type, 4)
 })

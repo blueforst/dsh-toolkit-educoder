@@ -409,7 +409,6 @@ test('同一作业的已核验下一关复用会话并更新目标阶段环境�
 for (const [name, options, usageReport] of [
   ['模型步数', { maxSteps: 1 }, usage],
   ['累计 token', { maxTotalTokens: 50 }, usage],
-  ['缺失 token 用量', {}, undefined],
 ]) {
   test(`${name} 超限时拒绝下一步`, async t => {
     const { run } = await fixture(t, async ({ beginStep, finishStep, finishTurn }) => {
@@ -421,6 +420,20 @@ for (const [name, options, usageReport] of [
     assert.equal((await run(codeTask())).status, 'budget');
   });
 }
+
+test('缺失 token 用量时不再中止执行或阻断会话续接', async t => {
+  const { run } = await fixture(t, async ({ beginStep, finishStep, finishTurn }) => {
+    for (let step = 0; step < 3; step++) {
+      assert.equal(await beginStep(), 'enter');
+      finishStep(undefined);
+    }
+    finishTurn();
+  });
+  const result = await run(codeTask());
+  assert.equal(result.status, 'finished');
+  assert.equal(result.steps, 3);
+  assert.ok(result.sessionResume?.sessionId);
+});
 
 test('截止时取消 Agent 并等待已启动的工具收尾后再释放会话', async t => {
   const { runs, run } = await fixture(t, async ({ beginStep, signal, finishTurn }) => {
@@ -583,6 +596,27 @@ test('createSaveEvidenceReader 可读取 CLI 状态文件中的保存记录并�
     path: 'a.py',
     content: 'legacy',
   });
+});
+
+test('题面部分附图加载成功时保留已加载图片继续执行，不再整题拒跑', async t => {
+  const loaded = [Buffer.from('one'), Buffer.from('two')].map(data => ({ data, mediaType: 'image/png' }));
+  const refs = [{ attachmentId: 'one' }, { attachmentId: 'two' }];
+  const { run } = await fixture(t, async ({ record, finishTurn }) => {
+    const prompt = record.message.content[0].text;
+    assert.match(prompt, /部分题面附图未能全部内联/);
+    assert.deepEqual(record.message.content.slice(1), refs.map(attachment => ({ type: 'image', attachment })));
+    finishTurn();
+  }, {}, {
+    llm: { resolveModelInfo: async () => ({ inputModalities: ['image'] }) },
+    attachments: { saveImages: async images => { assert.deepEqual(images, loaded); return refs; } },
+  });
+  const result = await run(codeTask({
+    instructions: '参考 [参考图 1] [参考图 2] [参考图 3]',
+    imageCount: 3,
+    imagesUnavailable: false,
+    loadImages: async () => loaded,
+  }));
+  assert.equal(result.status, 'finished');
 });
 
 test('超图限制仍保留前几张有效参考图并附加 CLI 图片/浏览器提示', async t => {

@@ -9,7 +9,7 @@ const apiOrigin = 'https://data.educoder.net';
 const identifier = /^[a-zA-Z0-9_-]{1,120}$/u;
 const numericId = /^[1-9][0-9]{0,14}$/u;
 const cookieValue = /^[\x21-\x7e]{1,8192}$/u;
-const maxText = 12_000;
+const maxText = 100_000;
 
 export const browserErrors = Object.freeze({
   browser_unavailable: '头歌浏览器暂时无法启动。',
@@ -19,8 +19,11 @@ export const browserErrors = Object.freeze({
   browser_cancelled: '头歌浏览器读取已停止。',
 });
 
-function browserError(code) {
-  return Object.assign(new Error(browserErrors[code]), { code });
+function browserError(code, detail) {
+  return Object.assign(new Error(browserErrors[code]), {
+    code,
+    ...(detail ? { detail } : {}),
+  });
 }
 
 function checkedScope(binding, session) {
@@ -83,7 +86,7 @@ function redact(text, session) {
 }
 
 /** 在新启动的 Chromium 中只读取已绑定关卡，不做请求拦截。工具调用者不能提供 URL 或浏览器指令。 */
-export function createBrowserInspector({ launch = launchChromium, proxy, timeoutMs = 24_000 } = {}) {
+export function createBrowserInspector({ launch = launchChromium, proxy, timeoutMs = 60_000 } = {}) {
   return async function inspectBrowser({ session, binding, signal, screenshotPath }) {
     const scope = checkedScope(binding, session);
     const deadline = AbortSignal.timeout(timeoutMs);
@@ -101,7 +104,7 @@ export function createBrowserInspector({ launch = launchChromium, proxy, timeout
       privateHome = await mkdtemp(join(tmpdir(), 'educoder-browser-'));
       browser = await launch({
         headless: true,
-        timeout: Math.min(timeoutMs, 10_000),
+        timeout: Math.min(timeoutMs, 30_000),
         env: { HOME: privateHome, PATH: process.env.PATH, LANG: 'C.UTF-8' },
         ...(proxy ? { proxy: { server: proxy } } : {}),
       });
@@ -135,15 +138,15 @@ export function createBrowserInspector({ launch = launchChromium, proxy, timeout
           throw browserError('browser_scope_unverified');
         }
       }
-      await page.waitForLoadState?.('networkidle', { timeout: 4_000 }).catch(() => {});
+      await page.waitForLoadState?.('networkidle', { timeout: 10_000 }).catch(() => {});
       opening.throwIfAborted();
       if (!sameTaskPage(page.url(), scope)) {
         failure = 'browser_scope_unverified';
         throw browserError('browser_scope_unverified');
       }
       failure = 'browser_render_failed';
-      const text = await page.locator('body').evaluate(body => body.innerText.slice(0, 24_000), undefined,
-        { timeout: 4_000 });
+      const text = await page.locator('body').evaluate(body => body.innerText.slice(0, 120_000), undefined,
+        { timeout: 10_000 });
       opening.throwIfAborted();
       const clean = redact(text, session);
       if (!clean) throw browserError('browser_render_failed');
@@ -154,7 +157,11 @@ export function createBrowserInspector({ launch = launchChromium, proxy, timeout
       return { text: clean.slice(0, maxText) };
     } catch (error) {
       if (signal?.aborted) throw browserError('browser_cancelled');
-      throw browserError(Object.hasOwn(browserErrors, error?.code) ? error.code : failure);
+      const code = Object.hasOwn(browserErrors, error?.code) ? error.code : failure;
+      const rawDetail = error?.detail || (typeof error?.message === 'string' && !Object.hasOwn(browserErrors, error?.code)
+        ? redact(error.message, session).slice(0, 300)
+        : undefined);
+      throw browserError(code, rawDetail || undefined);
     } finally {
       opening.removeEventListener('abort', stop);
       await context?.close().catch(() => {});

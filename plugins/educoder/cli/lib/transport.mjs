@@ -8,11 +8,11 @@ import { TerminalNotReadyError } from './terminal.mjs'
 import { createStatementImageParser, fetchStatementImage, maxImageBatchBytes } from './images.mjs'
 
 const productionUrl = 'https://data.educoder.net/api'
-const maxResponseBytes = 4 * 1024 * 1024
-const maxCodeBytes = 1024 * 1024
-const maxTerminalOutput = 16_000
-const maxChoiceQuestions = 200
-const choiceOptionIds = 'ABCDEFGHIJKLMN'
+const maxResponseBytes = 16 * 1024 * 1024
+const maxCodeBytes = 4 * 1024 * 1024
+const maxTerminalOutput = 262_144
+const maxChoiceQuestions = 1000
+const choiceOptionIds = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
 const errorMessages = {
   aborted: 'EduCoder 操作已取消。',
@@ -25,7 +25,7 @@ const errorMessages = {
   manual_required: 'EduCoder 需要人工处理当前账号或任务。',
   not_found: 'EduCoder 未找到指定的实训入口。',
   image_unavailable: 'EduCoder 题面图片暂不可用。',
-  course_limit: '该课程作业超过一键通关的 1000 项上限。',
+  course_limit: '该课程作业超过一键通关的 10000 项上限。',
   signature_error: 'EduCoder 请求签名校验失败，请核对配置与系统时间。',
   unavailable: 'EduCoder 暂时不可用或返回了无法识别的数据。',
   uncertain: 'EduCoder 写入结果未知，请先核对远端状态。',
@@ -33,15 +33,16 @@ const errorMessages = {
 }
 
 export class TransportError extends Error {
-  constructor(code) {
+  constructor(code, detail) {
     super(errorMessages[code] ?? errorMessages.unavailable)
     this.name = 'TransportError'
     this.code = code
+    if (typeof detail === 'string' && detail) this.detail = detail
   }
 }
 
-function fail(code) {
-  throw new TransportError(code)
+function fail(code, detail) {
+  throw new TransportError(code, detail)
 }
 
 function record(value) {
@@ -92,7 +93,7 @@ function readCookie(headers, name) {
   return checkedToken(values[0].split(';', 1)[0].slice(name.length + 1), 'manual_required')
 }
 
-function text(value, limit = 500) {
+function text(value, limit = 8_000) {
   return typeof value === 'string' ? value.slice(0, limit) : ''
 }
 
@@ -110,7 +111,7 @@ function safePath(value) {
 function taskPaths(raw) {
   if (typeof raw !== 'string' || !raw.trim()) return []
   const paths = raw.split(/[;；]/u).map(path => path.trim()).filter(Boolean)
-  return paths.length <= 128 && paths.every(safePath) ? [...new Set(paths)] : []
+  return paths.length <= 1024 && paths.every(safePath) ? [...new Set(paths)] : []
 }
 
 function readScope(target) {
@@ -153,7 +154,7 @@ function terminalEnvironment(raw) {
 function redact(value, secrets) {
   const tokens = new Set()
   for (const secret of secrets) {
-    if (typeof secret === 'string' && secret) {
+    if (typeof secret === 'string' && secret.length >= 4) {
       tokens.add(secret)
       tokens.add(encodeURIComponent(secret))
     }
@@ -162,6 +163,17 @@ function redact(value, secrets) {
     value = value.replaceAll(token, '[已脱敏]')
   }
   return value
+}
+
+function safeDetail(error, secrets) {
+  const raw = typeof error?.message === 'string' ? error.message : ''
+  if (!raw) return undefined
+  return redact(raw, secrets)
+    .replace(/(https?:\/\/)[^/@\s]+@/gi, '$1[已脱敏]@')
+    .replace(/([?&][^=\s]+=)[^&\s]+/g, '$1[已脱敏]')
+    .replace(/[\r\n]+/g, ' ')
+    .trim()
+    .slice(0, 300) || undefined
 }
 
 function accountSecrets(account) {
@@ -178,23 +190,23 @@ function choiceQuestions(raw, project) {
   const questions = []
   for (const question of raw) {
     if (typeof question?.subject !== 'string' || !question.subject.trim()) return null
-    const prompt = project(question.subject, 8_000)
+    const prompt = project(question.subject, 16_000)
     if (question.question_name === '判断题') {
       questions.push({ type: 'judge', prompt })
     } else if (question.question_name === '填空题') {
       const blankCount = question.multi_count
-      if (!Number.isSafeInteger(blankCount) || blankCount < 1 || blankCount > 30) return null
+      if (!Number.isSafeInteger(blankCount) || blankCount < 1 || blankCount > 200) return null
       questions.push({ type: 'fill', prompt, blankCount })
-    } else if (['单选题/多选题', '单选题', '多选题'].includes(question.question_name)) {
+    } else if (['单选题/多选题', '单选题', '多选题', '单项选择题', '多项选择题'].includes(question.question_name)) {
       const options = question.challenge_question
       if (!Array.isArray(options) || options.length < 2 || options.length > choiceOptionIds.length ||
           !options.every(option => typeof option?.option_name === 'string' && option.option_name.trim())) return null
-      const single = question.question_name === '单选题' ||
+      const single = question.question_name === '单选题' || question.question_name === '单项选择题' ||
         (question.question_name === '单选题/多选题' && question.category === 1)
       questions.push({
         type: single ? 'single' : 'multiple',
         prompt,
-        options: options.map((option, index) => ({ id: choiceOptionIds[index], text: project(option.option_name, 4_000) })),
+        options: options.map((option, index) => ({ id: choiceOptionIds[index], text: project(option.option_name, 8_000) })),
       })
     } else {
       return null
@@ -255,7 +267,7 @@ function normalizeTask(raw, scope, account, taskId, practiceId, supportsTerminal
   if (!record(game) || !record(challenge) || !record(user)) fail('unavailable')
   const ownerId = positiveId(user.user_id)
   if (ownerId !== account.remoteUserId || identifier(game.identifier) !== taskId ||
-      positiveId(raw.homework_common_id) !== scope.homeworkId) fail('invalid_scope')
+      (raw.homework_common_id != null && positiveId(raw.homework_common_id) !== scope.homeworkId)) fail('invalid_scope')
   if (raw.course_identifier && identifier(raw.course_identifier) !== scope.courseId) fail('invalid_scope')
   if (game.user_id && positiveId(game.user_id) !== ownerId) fail('invalid_scope')
   if (game.challenge_id && positiveId(game.challenge_id) !== positiveId(challenge.id)) fail('invalid_scope')
@@ -271,8 +283,9 @@ function normalizeTask(raw, scope, account, taskId, practiceId, supportsTerminal
     challengeId: positiveId(challenge.id),
   }
   const secrets = [...accountSecrets(account), raw.sec_key]
+  const pathSecrets = [account.autologin, account.session, raw.sec_key]
   const remotePaths = taskPaths(challenge.path)
-  const paths = remotePaths.every(path => redact(path, secrets) === path) ? remotePaths : []
+  const paths = remotePaths.every(path => redact(path, pathSecrets) === path) ? remotePaths : []
   const environments = Array.isArray(raw.shixun_environments) ? raw.shixun_environments : []
   const editor = environments.some(env => env?.tab_type === 1)
   const gui = environments.some(env => env?.tab_type === 3)
@@ -297,28 +310,29 @@ function normalizeTask(raw, scope, account, taskId, practiceId, supportsTerminal
   const failedVerdict = testSets.length > 0 && testSets.every(item => typeof item?.result === 'boolean') &&
     testSets.some(item => item.result === false)
     ? createHash('sha256').update(JSON.stringify(testSets.map(item => item.result))).digest('hex') : null
+  const sampleText = value => publicText(value, 8_000)
   const task = {
     binding,
     kind,
     // 头歌可能在选择题有错时也将关卡状态置为 2。只按已提交的答对题数认定通过。
     state: choice ? choiceState(score, choiceSubmitted) : status === 2 ? 'passed' : status === 3 ? 'failed' : 'pending',
     evaluating: status === 1 || (choice && choiceSubmitted && !score),
-    title: publicText(challenge.subject),
-    instructions: publicText(challenge.description || challenge.task_pass || game.description, 24_000),
+    title: publicText(challenge.subject, 1_000),
+    instructions: publicText(challenge.description || challenge.task_pass || game.description, 128_000),
     terminalAvailable: (kind === 'code' || kind === 'terminal') && supportsTerminal && terminalEnvironment(raw) !== null,
     paths: kind === 'code' ? paths : [],
     marker: evaluateCount === null ? '' : String(evaluateCount),
     failedVerdict: choice ? null : failedVerdict,
     ...(questions ? { questions } : {}),
     feedback: {
-      compiler: publicText(raw.last_compile_output, 6_000),
+      compiler: publicText(raw.last_compile_output, 32_000),
       ...(score ? { choice: score } : {}),
       publicTests: testSets.filter(item => item?.is_public === true && item.is_invisible !== true && item.is_invisible !== 1)
-        .slice(0, 16).map(item => ({
+        .slice(0, 128).map(item => ({
           passed: item.result === true,
-          input: visibleField(item.input, item.input_visible, publicText),
-          expected: visibleField(item.output, item.output_visible, publicText),
-          actual: visibleField(item.actual_output, item.actual_output_visible, publicText),
+          input: visibleField(item.input, item.input_visible, sampleText),
+          expected: visibleField(item.output, item.output_visible, sampleText),
+          actual: visibleField(item.actual_output, item.actual_output_visible, sampleText),
         })),
     },
   }
@@ -342,18 +356,18 @@ async function readJson(response, code) {
 }
 
 function responseStatus(data, login, mutation) {
-  if (!record(data)) fail(mutation ? 'uncertain' : 'unavailable')
-  if ([401, 403, '401', '403'].includes(data.status)) fail(login ? 'manual_required' : 'auth_required')
+  if (!record(data)) fail(mutation ? 'uncertain' : 'unavailable', 'invalid JSON payload')
+  if ([401, 403, '401', '403'].includes(data.status)) fail(login ? 'manual_required' : 'auth_required', `status=${data.status}`)
   if (data.status === -102) fail('signature_error')
   if (login && data.status === -3) fail('invalid_credentials')
-  if (login && Number.isInteger(data.status) && data.status < 0) fail('manual_required')
-  if (Number.isInteger(data.status) && data.status < 0) fail(mutation ? 'uncertain' : 'manual_required')
+  if (login && Number.isInteger(data.status) && data.status < 0) fail('manual_required', `login_status=${data.status}`)
+  if (Number.isInteger(data.status) && data.status < 0) fail(mutation ? 'uncertain' : 'unavailable', `api_status=${data.status}`)
 }
 
 export function createTransport({
   baseUrl = productionUrl,
   fetch: request = globalThis.fetch,
-  timeoutMs = 15_000,
+  timeoutMs = 45_000,
   signingAccessKey = process.env.EDUCODER_SIGNING_ACCESS_KEY,
   signingSecretKey = process.env.EDUCODER_SIGNING_SECRET_KEY,
   terminalRunner,
@@ -364,7 +378,7 @@ export function createTransport({
   const loopback = base.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname)
   if ((!production && !loopback) || base.username || base.password || base.search || base.hash ||
       base.pathname !== '/api') throw new TypeError('无效的 EduCoder 服务地址。')
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) {
     throw new TypeError('无效的 EduCoder 请求超时。')
   }
 
@@ -417,22 +431,22 @@ export function createTransport({
       } catch (error) {
         if (!readOnly || signal?.aborted) throw error
       }
-      if (!response || (readOnly && [502, 503, 504].includes(response.status))) {
+      if (!response || (readOnly && [408, 429, 500, 502, 503, 504].includes(response.status))) {
         await response?.body?.cancel().catch(() => {})
         await delay(300, undefined, { signal })
         response = await send()
       }
       if (response.status === 401 || response.status === 403) {
         await response.body?.cancel().catch(() => {})
-        fail(login ? 'manual_required' : 'auth_required')
+        fail(login ? 'manual_required' : 'auth_required', `http=${response.status}`)
       }
       if (detectNotFound && response.status === 404) {
         await response.body?.cancel().catch(() => {})
-        fail('not_found')
+        fail('not_found', 'http=404')
       }
       if (!response.ok) {
         await response.body?.cancel().catch(() => {})
-        fail(failure)
+        fail(failure, `http=${response.status}`)
       }
       const data = await readJson(response, failure)
       responseStatus(data, login, mutation)
@@ -442,7 +456,8 @@ export function createTransport({
       return { data, response }
     } catch (error) {
       if (error instanceof TransportError) throw error
-      fail(signal?.aborted && !mutation ? 'aborted' : failure)
+      const secrets = account ? accountSecrets(account) : []
+      fail(signal?.aborted && !mutation ? 'aborted' : failure, safeDetail(error, secrets))
     }
   }
 
@@ -450,8 +465,7 @@ export function createTransport({
     const { data } = await call('GET', '/courses.json', {
       account, signal, query: { page, limit, order: 'mine', search: '' },
     })
-    if (!Array.isArray(data.courses) || data.login === 'guest' ||
-        (data.login !== undefined && data.login !== account.zzud)) fail('auth_required')
+    if (!Array.isArray(data.courses) || data.login === 'guest') fail('auth_required')
     return { courses: data.courses, verified: data.user_id !== undefined }
   }
 
@@ -460,7 +474,7 @@ export function createTransport({
     const account = cleanSession(session)
     const result = new Map()
     const pageSize = 20
-    for (let page = 1; page <= 50; page++) {
+    for (let page = 1; page <= 500; page++) {
       const { courses: list } = await coursePage(account, page, pageSize, signal)
       const before = result.size
       for (const item of list) {
@@ -479,7 +493,7 @@ export function createTransport({
     const id = identifier(courseId)
     const result = new Map()
     const pageSize = 50
-    const pages = 20
+    const pages = 200
     const requireComplete = options?.requireComplete === true
     for (let page = 1; page <= pages + Number(requireComplete); page++) {
       const { data } = await call('GET', '/courses/' + id + '/homework_commons.json', {
@@ -572,7 +586,7 @@ export function createTransport({
     const visited = new Set()
     // The platform can return the last visited level. Walk only the selected
     // practice's previous links so a previously skipped level is not lost.
-    while (visited.size < 100) {
+    while (visited.size < 1000) {
       if (visited.has(taskId)) fail('manual_required')
       visited.add(taskId)
       const { raw, task } = await rawTask(account, scope, taskId, practiceId, signal)
@@ -600,8 +614,8 @@ export function createTransport({
         remaining -= data.byteLength
         result.push({ data, mediaType: image.mediaType, name: `参考图 ${image.index}` })
       }
-    } catch {
-      fail(signal?.aborted ? 'aborted' : 'image_unavailable')
+    } catch (error) {
+      fail(signal?.aborted ? 'aborted' : 'image_unavailable', safeDetail(error, []))
     }
     return result
   }
@@ -646,7 +660,7 @@ export function createTransport({
     const decoded = await readFileBytes(account, task.binding, path, signal)
     try {
       const code = new TextDecoder('utf-8', { fatal: true }).decode(decoded)
-      if (redact(code, [...accountSecrets(account), raw.sec_key]) !== code) fail('manual_required')
+      if (redact(code, [account.autologin, account.session, raw.sec_key]) !== code) fail('manual_required')
       return code
     } catch (error) {
       if (error instanceof TransportError) throw error
@@ -747,7 +761,7 @@ export function createTransport({
   async function runTerminal(session, target, command, options) {
     const signal = readSignal(options)
     if (!terminalRunner) fail('manual_required')
-    if (typeof command !== 'string' || !command.trim() || Buffer.byteLength(command) > 8192 ||
+    if (typeof command !== 'string' || !command.trim() || Buffer.byteLength(command) > 65_536 ||
         /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(command)) fail('invalid_scope')
     const { account, raw, task } = await pinnedTask(session, target, signal)
     if (!task.terminalAvailable) fail('manual_required')
@@ -783,7 +797,7 @@ export function createTransport({
     if (!Number.isSafeInteger(port) || port < 1 || port > 65535) fail('manual_required')
     const username = checkedToken(connection.username, 'manual_required')
     const password = checkedToken(connection.password, 'manual_required')
-    const runnerSignal = withDeadline(75_000, signal)
+    const runnerSignal = withDeadline(600_000, signal)
     if (runnerSignal.aborted) fail('uncertain')
     let result
     let onAbort
@@ -802,7 +816,7 @@ export function createTransport({
       if (error instanceof TerminalNotReadyError && !runnerSignal.aborted) {
         return { exitCode: 125, output: '未连接到关卡终端，命令没有发出。', notAvailable: true }
       }
-      fail('uncertain')
+      fail('uncertain', safeDetail(error, [...accountSecrets(account), password, endpoint.href, ...endpoint.searchParams.values()]))
     } finally {
       runnerSignal.removeEventListener('abort', onAbort)
     }
@@ -816,7 +830,7 @@ export function createTransport({
       output: redact(cleanOutput, [...accountSecrets(account), password, endpoint.href,
         ...endpoint.searchParams.values()]).slice(0, maxTerminalOutput),
       exitCode: result.exitCode,
-      proof: result.exitCode === 0 ? rememberProof(binding, { kind: 'terminal', environmentId }) : undefined,
+      proof: !result.notAvailable ? rememberProof(binding, { kind: 'terminal', environmentId }) : undefined,
     }
   }
 
@@ -838,12 +852,13 @@ export function createTransport({
       (Array.isArray(raw.shixun_environments) ? raw.shixun_environments : []).find(item => item?.tab_type === 1)
     const environmentId = env?.shixun_environment_id ?? 0
     if (!Number.isSafeInteger(environmentId) || environmentId < 0 ||
-        (terminal && environmentId !== receipt.environmentId)) fail('manual_required')
+        (terminal && receipt.environmentId !== undefined && environmentId !== receipt.environmentId)) fail('manual_required')
     let secKey = receipt.secKey
-    if (terminal) {
-      const terminalKey = raw.sec_key ?? ''
-      secKey = terminalKey === '' ? '' : checkedToken(terminalKey, 'manual_required')
+    if (terminal || (receipt.fallbackCurrent && secKey === undefined)) {
+      const rawKey = raw.sec_key ?? ''
+      secKey = rawKey === '' ? '' : checkedToken(rawKey, 'manual_required')
     }
+    const commitId = receipt.commitId ?? (receipt.fallbackCurrent && !terminal ? raw.myshixun?.commit_id : undefined) ?? ''
     proofs.delete(proof)
     const { data } = await call('POST', '/tasks/' + binding.taskId + '/game_build.json', {
       account,
@@ -856,7 +871,7 @@ export function createTransport({
         content_modified: 0,
         shixun_environment_id: environmentId,
         tab_type: terminal ? 4 : 1,
-        extras: { ...buildExtras(binding), commitID: receipt.commitId ?? '' },
+        extras: { ...buildExtras(binding), commitID: commitId },
       },
     })
     if (data.res?.code !== undefined && data.res.code !== 0) fail('uncertain')

@@ -24,9 +24,9 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 CapabilityBoundingSet=
 UMask=0077
-LimitNOFILE=128
-TasksMax=24
-MemoryMax=64M
+LimitNOFILE=1024
+TasksMax=512
+MemoryMax=256M
 
 [Install]
 WantedBy=multi-user.target

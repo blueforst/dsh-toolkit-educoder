@@ -26,7 +26,7 @@ window.__ModuleLoader__.load({
       auth_required: '账号会话已失效，请重新登录。',
       invalid_credentials: '登录未通过，请检查账号和密码。',
       tasks_disabled: '当前实例开放账号登录和课程查看，作业执行尚未启用。',
-      course_limit: '该课程超过 1000 项作业，请分批启动。',
+      course_limit: '该课程超过 10000 项作业，请分批启动。',
       live_disabled: '此实例未启用真实 EduCoder 提交。',
       next_stage: '已通过本关，准备读取下一关。',
       stage_limit: '已达到单次任务的关卡上限。',

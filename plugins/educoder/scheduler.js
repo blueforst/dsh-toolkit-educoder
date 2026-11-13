@@ -467,7 +467,8 @@ export function createScheduler({
     }
     const canContinue = hasVerifiedSuccessor(task, status, code) &&
       (task.stageContinuations ?? 0) < MAX_STAGE_CONTINUATIONS;
-    if (automaticRetries && mode === 'reconcile' && status === 'paused' && code === 'resume_after_readback' && !task.mutation &&
+    if (automaticRetries && mode === 'reconcile' && status === 'paused' &&
+        ['resume_after_readback', 'recovery_required'].includes(code) && !task.mutation &&
         (task.stageRetries ?? 0) < maxAttempts - 1) {
       task.stageRetries = (task.stageRetries ?? 0) + 1;
       task.stageContinuation = true;

@@ -151,7 +151,7 @@ export function resolveCliConfig(flags = {}, env = process.env, { requireSession
     json: Boolean(flags['--json']),
     wait: flags['--no-wait'] ? false : true,
     pollMs: parsePositiveInt(flags['--poll-ms'], 1500, '--poll-ms'),
-    pollAttempts: parsePositiveInt(flags['--poll-attempts'], 20, '--poll-attempts'),
+    pollAttempts: parsePositiveInt(flags['--poll-attempts'], 60, '--poll-attempts'),
   };
 }
 
@@ -166,7 +166,7 @@ export function redactText(text, config = {}) {
     config.signingSecretKey,
   ];
   for (const secret of secrets) {
-    if (typeof secret === 'string' && secret.length > 0) {
+    if (typeof secret === 'string' && secret.length >= 4) {
       output = output.replaceAll(secret, '[已脱敏]').replaceAll(encodeURIComponent(secret), '[已脱敏]');
     }
   }

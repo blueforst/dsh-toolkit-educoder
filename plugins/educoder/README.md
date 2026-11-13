@@ -13,7 +13,7 @@
 - `inspect` / `read-file` / `save-file` / `evaluate` / `submit-choices` / `terminal` / `browser` / `images`
 - `doctor` / `cli-diff` / `cli-restore`：支持检查依赖、对比 relative-to-`.baseline` 的改动，以及在模型修复 `./cli/` 后跨任务、跨重启和插件升级保留自定义补丁（未修改的文件随插件升级自动更新，必要时可用 `cli-restore` 还原）。
 
-作业会话屏蔽 `plan-mode`、`schedule`、`subagent`、`goal`、`skill`、`web_search`/`web_fetch`、`todo_write` 等非编码插件与所有 `educoder_*` 专属工具；题干含图片时优先通过原生图片附件传递前 4 张可用图片（若超限或缺失，可搭配 `images --download`、`browser --screenshot` 与原生 `read_image` 读取）。启用 `DSH_EDUCODER_BROWSER_INSPECTION=1` 且满足网页查看条件时开放 `browser` 子命令（无网络拦截）。每关支持自动重试（默认最多 12 次尝试）；独立 VNC 图形实训仍需人工处理。
+作业会话屏蔽 `plan-mode`、`schedule`、`subagent`、`goal`、`skill`、`web_search`/`web_fetch`、`todo_write` 等非编码插件与所有 `educoder_*` 专属工具；题干含图片时优先通过原生图片附件传递前 16 张可用图片（若超限或缺失，可搭配 `images --download`、`browser --screenshot` 与原生 `read_image` 读取）。启用 `DSH_EDUCODER_BROWSER_INSPECTION=1` 且满足网页查看条件时开放 `browser` 子命令（无网络拦截）。每关支持自动重试（默认最多 12 次尝试）；独立 VNC 图形实训仍需人工处理。
 
 真实账号默认关闭。启用需要专用实例、通过检查的凭据隔离补丁、已授权的 EduCoder 签名配置，以及用户在受保护页面输入账号信息。真实作业执行另需显式启用并指定模型。DSH 以本地凭据服务保存会话，插件不保存原始密码。操作命令与回滚方式见 [开发实例部署](https://github.com/blueforst/dsh-toolkit-educoder/blob/main/deploy/educoder/README.md)。
 

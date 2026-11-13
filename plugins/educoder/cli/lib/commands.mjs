@@ -186,11 +186,16 @@ function formatEvaluationResult(result) {
 }
 
 async function waitForEvaluation(transport, config, priorMarker) {
+  let sawEvaluating = false;
+  const graceAttempt = Math.min(4, Math.max(1, config.pollAttempts - 1));
   for (let attempt = 0; attempt < config.pollAttempts; attempt++) {
     const task = await transport.inspect(config.session, config.target);
-    const markerAdvanced = !priorMarker || task.marker !== priorMarker;
+    if (task.evaluating) sawEvaluating = true;
     if (task.state === 'passed') return task;
-    if (!task.evaluating && (markerAdvanced || attempt > 0)) return task;
+    const markerAdvanced = Boolean(priorMarker && task.marker && task.marker !== priorMarker);
+    if (!task.evaluating && (markerAdvanced || sawEvaluating || attempt >= graceAttempt)) {
+      return task;
+    }
     if (attempt + 1 < config.pollAttempts) {
       await new Promise(resolveTimer => setTimeout(resolveTimer, config.pollMs));
     }
@@ -433,21 +438,30 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
         priorMarker = task.marker;
         const remotePath = resolveRemotePath(args[0], task);
         proof = await saveWithState(t, config, remotePath, content, task);
-      } else {
-        if (!state?.proof || (state.targetKey && state.targetKey !== digestTarget(config.target))) {
-          throw new UsageError('当前任务尚未保存可评测的变更，请先执行 save-file、terminal，或使用 evaluate --from <localFile>。');
-        }
+      } else if (state?.proof && (!state.targetKey || state.targetKey === digestTarget(config.target))) {
         priorMarker = state.lastSave?.marker;
+        if (priorMarker === undefined) {
+          const current = await t.inspect(config.session, config.target);
+          priorMarker = current.marker;
+        }
         proof = t.restoreProof(state.proof);
+      } else {
+        const task = await t.inspect(config.session, config.target);
+        priorMarker = task.marker;
+        proof = t.restoreProof({
+          kind: task.kind === 'code' ? 'code' : 'terminal',
+          binding: task.binding,
+          fallbackCurrent: true,
+        });
       }
       await t.evaluate(config.session, config.target, proof);
       const latest = config.wait
         ? await waitForEvaluation(t, config, priorMarker)
         : await t.inspect(config.session, config.target);
       const afterState = await readCliState(config);
-      const { proof: _consumed, ...restState } = afterState;
       await writeCliState(config, {
-        ...restState,
+        ...afterState,
+        targetKey: digestTarget(config.target),
         lastEvaluation: {
           state: latest.state,
           evaluating: Boolean(latest.evaluating),

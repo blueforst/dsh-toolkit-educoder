@@ -335,6 +335,49 @@ test('原生任务达到历史尝试上限后，手动暂停和继续仍沿用�
   assert.equal(queue.pause(task.id).status, 'paused');
 });
 
+test('reconcile 返回 recovery_required 且启用自动重试时自动恢复排队而不是停在 paused', { timeout: 8000 }, async t => {
+  let runs = 0;
+  let reconciles = 0;
+  const { file, open } = setup(t);
+  let queue = open();
+  const task = queue.enqueue(target('a'));
+  await queue.close();
+
+  const db = new DatabaseSync(file);
+  try {
+    const state = JSON.parse(db.prepare('SELECT data FROM scheduler_state WHERE id=1').get().data);
+    Object.assign(state.tasks[task.id], {
+      status: 'running',
+      attempts: 1,
+      binding: bind(task),
+      marker: '0',
+    });
+    db.prepare('UPDATE scheduler_state SET data=? WHERE id=1').run(JSON.stringify(state));
+  } finally {
+    db.close();
+  }
+
+  queue = open({
+    maxAttempts: 3,
+    automaticRetries: true,
+    retryDelayMs: 10,
+    reconcile(current) {
+      reconciles++;
+      return reconciles === 1
+        ? { status: 'paused', code: 'recovery_required', marker: '0' }
+        : verify(current);
+    },
+    worker(current, { checkpoint }) {
+      runs++;
+      checkpoint({ binding: current.binding, marker: '1' });
+      return { status: 'passed', binding: current.binding, marker: '1' };
+    },
+  });
+  const passed = await until(queue, task.id, 'passed');
+  assert.equal(runs, 1);
+  assert.equal(passed.attempts, 1);
+});
+
 test('默认允许超过 3 次自动重试，且调度异常时记录脱敏日志', { timeout: 8000 }, async t => {
   const warnings = [];
   let attempts = 0;

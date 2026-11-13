@@ -17,10 +17,11 @@ const FAKE_SESSION = {
   zzud: 'zzud-user-7001',
 };
 
-function startMockEduCoder(t, { mode = 'code' } = {}) {
+function startMockEduCoder(t, { mode = 'code', staleBeforeEvaluating = false, failFirstBuild = false } = {}) {
   let codeContent = '# starter\nsecret_echo = "ok"\n';
   let builds = 0;
   let inspectAfterBuild = 0;
+  let stalePolls = 0;
   let state = 'pending';
   let kind = mode;
   let evaluateCount = 0;
@@ -45,14 +46,17 @@ function startMockEduCoder(t, { mode = 'code' } = {}) {
     }
 
     if (req.method === 'GET' && url.pathname === '/api/tasks/task-101.json') {
-      if (state === 'evaluating') {
+      if (state === 'pending' && stalePolls > 0) {
+        stalePolls--;
+        state = 'evaluating';
+      } else if (state === 'evaluating') {
         inspectAfterBuild++;
         if (inspectAfterBuild >= 2) {
-          state = 'passed';
+          state = failFirstBuild && builds === 1 ? 'failed' : 'passed';
           evaluateCount++;
         }
       }
-      const gameStatus = state === 'passed' ? 2 : state === 'evaluating' ? 1 : 0;
+      const gameStatus = state === 'passed' ? 2 : state === 'evaluating' ? 1 : state === 'failed' ? 3 : 0;
       const baseOrigin = `http://127.0.0.1:${server.address().port}`;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -112,7 +116,13 @@ function startMockEduCoder(t, { mode = 'code' } = {}) {
 
     if (req.method === 'POST' && url.pathname === '/api/tasks/task-101/game_build.json') {
       builds++;
-      state = 'evaluating';
+      inspectAfterBuild = 0;
+      if (staleBeforeEvaluating && builds === 1) {
+        stalePolls = 1;
+        state = 'pending';
+      } else {
+        state = 'evaluating';
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 0, res: { code: 0 } }));
       return;
@@ -337,4 +347,61 @@ test('DS 修复工作区 CLI 后可跨 syncCliWorkspace 保留、查看 diff 与
   });
   await syncCliWorkspace(sharedRoot, { sourceRoot: fakeSrcRoot, reset: true });
   assert.equal(await readFile(join(sharedRoot, 'cli-symlink-target.txt'), 'utf8'), 'keep-me\n');
+});
+
+test('工作区 CLI 支持直接评测当前提交、宽限轮询启动延迟、连续评测复用 proof 及代码中的 zzud', async t => {
+  const sharedRoot = await mkdtemp(join(tmpdir(), 'dsh-cli-fallback-'));
+  t.after(() => rm(sharedRoot, { recursive: true, force: true }));
+  const cliInfo = await syncCliWorkspace(sharedRoot);
+
+  const makeEnv = async (name, mockOpts) => {
+    const workdir = await ensureTaskWorkdir(sharedRoot, name);
+    const mock = await startMockEduCoder(t, { mode: 'code', ...mockOpts });
+    return {
+      mock,
+      env: {
+        DSH_EDUCODER_CLI: cliInfo.entrypoint,
+        DSH_EDUCODER_CLI_ROOT: cliInfo.cliRoot,
+        DSH_EDUCODER_WORKDIR: workdir,
+        DSH_EDUCODER_API_URL: mock.apiUrl,
+        DSH_EDUCODER_SESSION: JSON.stringify(FAKE_SESSION),
+        DSH_EDUCODER_TARGET: JSON.stringify({
+          courseId: 'course-1',
+          homeworkId: '202',
+          taskId: 'task-101',
+          binding: {
+            courseId: 'course-1',
+            homeworkId: '202',
+            taskId: 'task-101',
+            practiceId: 'practice-303',
+            remoteUserId: '7001',
+            gameId: '404',
+            challengeId: '505',
+          },
+        }),
+      },
+    };
+  };
+
+  // 未先执行 save-file 时直接 evaluate，应回退到当前远端提交并容忍首轮非 building 延迟后正常等到 passed
+  const direct = await makeEnv('acc1-direct', { staleBeforeEvaluating: true });
+  const directEval = JSON.parse((await runCliProcess(cliInfo.entrypoint, [
+    'evaluate', '--poll-ms', '20', '--poll-attempts', '6', '--json',
+  ], direct.env)).stdout);
+  assert.equal(directEval.state, 'passed');
+  assert.equal(direct.mock.getBuilds(), 1);
+
+  // 保存含 zzud 用户名文本的代码不触发 manual_required，且单次 save-file 后可连续 evaluate 两次（先 failed 后 passed）
+  const reuse = await makeEnv('acc1-reuse', { failFirstBuild: true });
+  const codeWithZzud = `# user=${FAKE_SESSION.zzud}\nprint("${FAKE_SESSION.zzud}")\n`;
+  await runCliProcess(cliInfo.entrypoint, ['save-file', 'src/main.py', '--content', codeWithZzud], reuse.env);
+  const outPath = join(sharedRoot, 'readback-main.py');
+  await runCliProcess(cliInfo.entrypoint, ['read-file', 'src/main.py', '--out', outPath], reuse.env);
+  assert.equal(await readFile(outPath, 'utf8'), codeWithZzud);
+
+  const eval1 = JSON.parse((await runCliProcess(cliInfo.entrypoint, ['evaluate', '--poll-ms', '20', '--poll-attempts', '6', '--json'], reuse.env)).stdout);
+  assert.equal(eval1.state, 'failed');
+  const eval2 = JSON.parse((await runCliProcess(cliInfo.entrypoint, ['evaluate', '--poll-ms', '20', '--poll-attempts', '6', '--json'], reuse.env)).stdout);
+  assert.equal(eval2.state, 'passed');
+  assert.equal(reuse.mock.getBuilds(), 2);
 });

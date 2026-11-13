@@ -1,6 +1,6 @@
-const maxImages = 4;
-const maxImageBytes = 512 * 1024;
-const maxImageBatchBytes = 1536 * 1024;
+const maxImages = 16;
+const maxImageBytes = 4 * 1024 * 1024;
+const maxImageBatchBytes = 32 * 1024 * 1024;
 
 const mediaTypes = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const attachmentPath = /^\/api\/attachments\/[A-Za-z0-9_-]{1,256}={0,2}$/u;
@@ -51,10 +51,17 @@ export function statementImages(statement, origin) {
   return { text: parser.parse(statement), ...parser.result() };
 }
 
+function acceptableImageType(rawHeader, expectedMediaType) {
+  const contentType = rawHeader?.split(';')[0].trim().toLowerCase();
+  if (!contentType) return false;
+  const normalized = contentType === 'image/jpg' ? 'image/jpeg' : contentType;
+  return normalized === expectedMediaType || normalized === 'application/octet-stream';
+}
+
 export async function readImage(response, mediaType, availableBytes) {
   const limit = Math.min(maxImageBytes, availableBytes);
   if (!response.ok || !response.body || limit <= 0 ||
-      response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== mediaType ||
+      !acceptableImageType(response.headers.get('content-type'), mediaType) ||
       Number(response.headers.get('content-length')) > limit) {
     await response.body?.cancel().catch(() => {});
     throw new Error('无法读取题面图片');

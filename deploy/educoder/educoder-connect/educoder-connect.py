@@ -16,11 +16,11 @@ DESTINATIONS = {
     b"prod-attachments.oss-accelerate.aliyuncs.com:443": "prod-attachments.oss-accelerate.aliyuncs.com",
 }
 HEADER_LIMIT = 8192
-MAX_CONNECTIONS = 16
-TUNNEL_TIMEOUT = 45
-CONNECT_TIMEOUT = 10
+MAX_CONNECTIONS = 128
+TUNNEL_TIMEOUT = 600
+CONNECT_TIMEOUT = 20
 DNS_RETRY_DELAY = 0.15
-ADDRESS_CONNECT_TIMEOUT = 4
+ADDRESS_CONNECT_TIMEOUT = 8
 
 
 async def connect_educoder(destination):
