@@ -50,10 +50,13 @@ export function apply(ctx) {
   }
   // DSH 的工作区导航依赖目录选择的 Remote 命名空间。空后端不访问文件系统。
   ctx.provide('directoryPicker', disabledDirectoryPicker);
-  // 运行时每次使用前重新核对。独立部署的 Host 本身仍是可信管理员边界。
+  // 运行时每次使用前重新核对。要求隔离 shellEnv 与 workspace-write 沙箱策略就绪，
+  // 且管理面、任意文件/终端接口处于关闭状态；独立部署的 Host 本身仍是可信管理员边界。
   ctx.provide('educoderCredentialBoundary', () => {
     const readonlySettings = process.env.DSH_EDUCODER_READONLY_SETTINGS === '1';
     return ctx.get('directoryPicker')?.capability()?.kind === 'unavailable' &&
+      ctx.get('shellEnv', false) !== undefined &&
+      ctx.get('sandboxPolicy', false) !== undefined &&
       forbidden.every(key => ctx.get(key, false) === undefined) &&
       (ctx.get('pluginManager', false) === undefined || readonlySettings) &&
       settingsServices.every(key => (ctx.get(key, false) !== undefined) === readonlySettings);

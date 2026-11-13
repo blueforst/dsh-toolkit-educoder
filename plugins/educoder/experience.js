@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, realpath } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
+import { ensureTaskWorkdir, syncCliWorkspace } from './cli-workspace.js';
 
 const README = `# EduCoder 专属工作区
 
@@ -64,7 +65,8 @@ export async function createExperience({ root, workspaceRegistry }) {
   const file = join(canonical, '解题经验.md');
   await seed(join(canonical, 'README.md'), README);
   await seed(file, SEED);
-  const workspace = await workspaceRegistry.create(canonical, 'EduCoder');
+  const cli = await syncCliWorkspace(canonical);
+  const workspace = workspaceRegistry ? await workspaceRegistry.create(canonical, 'EduCoder') : undefined;
   let writes = Promise.resolve();
 
   async function read() {
@@ -103,5 +105,12 @@ export async function createExperience({ root, workspaceRegistry }) {
     return write;
   }
 
-  return { root: canonical, workspace, read, append };
+  return {
+    root: canonical,
+    workspace,
+    cli,
+    ensureTaskWorkdir: key => ensureTaskWorkdir(canonical, key),
+    read,
+    append,
+  };
 }

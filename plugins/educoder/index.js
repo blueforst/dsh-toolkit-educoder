@@ -118,19 +118,29 @@ export function apply(ctx) {
     try {
       proxy = createEduCoderProxy(scopedProxy);
       const transport = createTransport({ baseUrl, terminalRunner, fetch: proxy.fetch });
+      const sharedWorkspaceRoot = process.env.DSH_EDUCODER_WORKSPACE_DIR || join(root, 'workspace');
       const experience = dedicated && (live || process.env.DSH_EDUCODER_WORKSPACE_DIR) ? createExperience({
-        root: process.env.DSH_EDUCODER_WORKSPACE_DIR || join(root, 'workspace'), workspaceRegistry: ctx.workspaceRegistry,
+        root: sharedWorkspaceRoot, workspaceRegistry: ctx.workspaceRegistry,
       }).catch(() => {
         ctx.logger.warn('EduCoder 工作区初始化失败。');
         return undefined;
       }) : undefined;
       const runAgent = createAgentRunner(ctx, {
         workspaceRoot: join(root, 'workspaces'),
+        sharedWorkspaceRoot,
         provider,
         model,
         experience,
         extended: publicAdmin,
+        nativeTools: true,
         toolBoundary: boundary,
+        apiUrl: baseUrl,
+        proxyUrl: httpsProxy,
+        signingAccessKey: process.env.EDUCODER_SIGNING_ACCESS_KEY,
+        signingSecretKey: process.env.EDUCODER_SIGNING_SECRET_KEY,
+        terminalEnabled: process.env.DSH_EDUCODER_TERMINAL_ENABLED === '1',
+        browserInspection: process.env.DSH_EDUCODER_BROWSER_INSPECTION === '1',
+        readOnly: process.env.DSH_EDUCODER_READONLY_TASKS === '1',
       });
       service = createService({
         root,
@@ -140,7 +150,11 @@ export function apply(ctx) {
         experience,
         inspectBrowser,
         extended: publicAdmin,
-        readSaveEvidence: createSaveEvidenceReader(ctx),
+        nativeTools: true,
+        readSaveEvidence: createSaveEvidenceReader(ctx, {
+          sharedWorkspaceRoot,
+          workspaceRoot: join(root, 'workspaces'),
+        }),
         allowAccounts: () => dedicated && (fixture || (
           live && (publicAdmin || ctx.get('educoderCredentialBoundary', false)?.() === true)
         )),

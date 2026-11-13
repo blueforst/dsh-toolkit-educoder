@@ -305,6 +305,39 @@ function toolCall(name, args, identity) {
   } };
 }
 
+function bashCall(description, command, identity, suffix = '') {
+  const call = toolCall('bash', { description, command }, identity);
+  if (suffix) call.id += suffix;
+  return call;
+}
+
+function bashCommands(messages) {
+  return messages.flatMap(message => message.tool_calls ?? [])
+    .filter(call => call.function?.name === 'bash')
+    .map(call => {
+      try {
+        return JSON.parse(call.function.arguments || '{}').command || '';
+      } catch {
+        return '';
+      }
+    });
+}
+
+function assertOnlyNativeTools(input) {
+  const names = input.tools?.map(tool => tool.function?.name).sort() ?? [];
+  const nativeAllowed = new Set([
+    'bash', 'pwsh', 'read', 'read_image', 'write', 'edit',
+    'glob', 'grep', 'job_output', 'job_list', 'job_kill',
+  ]);
+  const validTools = names.includes('bash') && names.includes('read') &&
+    names.includes('write') && names.includes('edit') &&
+    names.every(name => nativeAllowed.has(name));
+  const systemText = JSON.stringify((input.messages ?? []).filter(m => m.role === 'system'));
+  const forbidden = ['educoder_read_file', 'educoder_save_file', 'educoder_evaluate', 'exit_plan_mode', 'web_search', 'todo_write'];
+  const cleanPrompt = !forbidden.some(item => systemText.includes(item));
+  return { names, ok: validTools && cleanPrompt };
+}
+
 function stream(response, input, output, call) {
   response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
   const base = {
@@ -314,8 +347,7 @@ function stream(response, input, output, call) {
   const send = chunk => response.write('data: ' + JSON.stringify({ ...base, ...chunk }) + '\n\n');
   const delta = call ? { role: 'assistant', tool_calls: [call] } : { role: 'assistant', content: output };
   send({ choices: [{ index: 0, delta, finish_reason: null }] });
-  const small = input.tools?.some(tool => tool.function?.name === 'educoder_record_experience') ||
-    JSON.stringify(input.messages).includes('SESSION_REUSE_FIXTURE');
+  const small = JSON.stringify(input.messages).includes('SESSION_REUSE_FIXTURE');
   send({
     choices: [{ index: 0, delta: {}, finish_reason: call ? 'tool_calls' : 'stop' }],
     usage: small ? { prompt_tokens: 1000, completion_tokens: 200, total_tokens: 1200 }
@@ -338,32 +370,39 @@ function resumeModel(response, input, identity) {
     state.affinity = affinity;
   }
   if (state.prefix !== prefix || state.affinity !== affinity) return reject(response);
+  const saveIncorrect = `printf 'print("incorrect")\\n' | node "$DSH_EDUCODER_CLI" save-file ${codePath} --stdin`;
+  const saveSolution = `cat <<'EOF' | node "$DSH_EDUCODER_CLI" save-file ${codePath} --stdin\n${identity.solution}EOF`;
   const actions = [
-    ['educoder_read_file', { path: codePath }],
-    ['educoder_save_file', { path: codePath, content: 'print("incorrect")\n' }],
-    ['educoder_evaluate', {}],
+    ['Read starter code', `node "$DSH_EDUCODER_CLI" read-file ${codePath}`],
+    ['Save incorrect attempt', saveIncorrect],
+    ['Evaluate incorrect submission', 'node "$DSH_EDUCODER_CLI" evaluate'],
     null,
-    ['educoder_evaluate', {}],
-    ['educoder_read_file', { path: codePath }],
-    ['educoder_save_file', { path: codePath, content: identity.solution }],
-    ['educoder_evaluate', {}],
+    ['Verify evaluate requires fresh save', 'node "$DSH_EDUCODER_CLI" evaluate'],
+    ['Re-read current file', `node "$DSH_EDUCODER_CLI" read-file ${codePath}`],
+    ['Save working solution', saveSolution],
+    ['Evaluate working solution', 'node "$DSH_EDUCODER_CLI" evaluate'],
     null,
   ];
   const index = state.accepted.length;
   const text = JSON.stringify(latest?.content ?? null);
   const sent = [0, 1, 2, 3, 3, 4, 5, 6, 7];
-  const checks = [true, text.includes('starter'), text.includes('saved'), text.includes('failed'),
+  const checks = [
+    true,
+    text.includes('starter'),
+    text.includes('已保存远程文件'),
+    text.includes('failed'),
     latest?.role === 'user' && text.includes('继续当前关卡') && messages.some(message =>
       message.role === 'tool' && JSON.stringify(message.content).includes('failed')),
-    text.includes('not_ready') && identity.builds === 1, text.includes('incorrect'),
-    text.includes('saved'), text.includes('passed') && identity.builds === 2];
+    text.includes('尚未保存可评测的变更') && identity.builds === 1,
+    text.includes('incorrect'),
+    text.includes('已保存远程文件'),
+    text.includes('passed') && identity.builds === 2,
+  ];
   if (index >= actions.length || calls.length !== sent[index] || !checks[index]) return reject(response);
   state.accepted.push(index);
   const action = actions[index];
   if (!action) return stream(response, input, index === 3 ? '平台判定未通过。' : '模拟平台已返回评测结果。');
-  const call = toolCall(...action, identity);
-  call.id += '_' + index;
-  return stream(response, input, '', call);
+  return stream(response, input, '', bashCall(action[0], action[1], identity, '_' + index));
 }
 
 async function model(request, response) {
@@ -374,14 +413,10 @@ async function model(request, response) {
   const available = [...identities.values()].flatMap(games);
   const identity = available.find(item => item.game === game);
   if (!identity) return stream(response, input, '工具包隔离验收通过。');
-  const names = input.tools?.map(tool => tool.function?.name).sort() ?? [];
-  if (identity.stages) return stagedModel(response, input, identity, names);
-  const expectedNames = identity.workspace
-    ? 'educoder_evaluate,educoder_read_file,educoder_record_experience,educoder_save_file'
-    : 'educoder_evaluate,educoder_read_file,educoder_save_file';
-  if (names.join(',') !== expectedNames
-      || [identity.login, identity.auto, identity.session, identity.proof, 'never-project-private-test']
-        .some(value => transcript.includes(value))) return reject(response);
+  const { names, ok: nativeOk } = assertOnlyNativeTools(input);
+  if (identity.stages) return stagedModel(response, input, identity, names, nativeOk);
+  if (!nativeOk || [identity.login, identity.auto, identity.session, identity.proof, 'never-project-private-test']
+    .some(value => transcript.includes(value))) return reject(response);
   const foreign = available.some(item => item !== identity && transcript.includes(item.key));
   if (foreign) return reject(response);
   if (identity.resume) {
@@ -399,54 +434,54 @@ async function model(request, response) {
     identity.imageRequests++;
   }
   identity.modelCalls++;
-  const previousToolCalls = input.messages.flatMap(message => message.tool_calls ?? []).map(call => call.function?.name);
-  if (identity.workspace && !previousToolCalls.length) {
+  const commands = bashCommands(input.messages);
+  if (identity.workspace && !commands.length) {
     if (!transcript.includes('工作区内的既往经验仅供参考') ||
         (identity.workspace === 'bob' && !transcript.includes(experienceNote(identity.group)))) return reject(response);
-    if (identity.workspace === 'alice') {
-      return stream(response, input, '', toolCall('educoder_record_experience', { note: '通过前尝试写入，不应保存。' }, identity));
-    }
   }
-  if (identity.workspace === 'alice' && previousToolCalls.length === 1 && previousToolCalls[0] === 'educoder_record_experience' &&
-      !input.messages.some(message => message.role === 'tool' && JSON.stringify(message.content).includes('false'))) return reject(response);
-  if (!previousToolCalls.includes('educoder_read_file')) {
+  if (!commands.some(cmd => cmd.includes('read-file ' + codePath))) {
     if (!groupActivity.has(identity.group)) groupActivity.set(identity.group, { active: 0, peak: 0 });
     const activity = groupActivity.get(identity.group);
     activity.active++;
     activity.peak = Math.max(activity.peak, activity.active);
     try {
       await wait(350);
-      return stream(response, input, '', toolCall('educoder_read_file', { path: codePath }, identity));
+      return stream(response, input, '', bashCall('Read starter code', `node "$DSH_EDUCODER_CLI" read-file ${codePath}`, identity));
     } finally {
       activity.active--;
     }
   }
-  if (!previousToolCalls.includes('educoder_save_file')) {
+  if (!commands.some(cmd => cmd.includes('save-file ' + codePath))) {
     if (!transcript.includes(identity.key + ' starter')) return reject(response);
-    return stream(response, input, '', toolCall('educoder_save_file', {
-      path: codePath, content: color ? codeForColor(color) : identity.solution,
-    }, identity));
+    const content = color ? codeForColor(color) : identity.solution;
+    const cmd = `cat <<'EOF' | node "$DSH_EDUCODER_CLI" save-file ${codePath} --stdin\n${content}EOF`;
+    return stream(response, input, '', bashCall('Save solution', cmd, identity));
   }
-  if (!previousToolCalls.includes('educoder_evaluate')) {
-    if (!transcript.includes('saved')) return reject(response);
-    return stream(response, input, '', toolCall('educoder_evaluate', {}, identity));
+  if (!commands.some(cmd => cmd.includes(' evaluate'))) {
+    if (!transcript.includes('已保存远程文件')) return reject(response);
+    return stream(response, input, '', bashCall('Evaluate solution', 'node "$DSH_EDUCODER_CLI" evaluate', identity));
   }
   if (!identity.passed) return reject(response);
   if (identity.workspace) {
-    const recorded = previousToolCalls.filter(name => name === 'educoder_record_experience').length;
-    if (recorded < (identity.workspace === 'alice' ? 2 : 1)) {
-      const call = toolCall('educoder_record_experience', { note: experienceNote(identity.group) }, identity);
-      call.id += '_passed';
-      return stream(response, input, '', call);
+    const recorded = commands.some(cmd => cmd.includes('EXP_WRITE_DONE'));
+    if (!recorded) {
+      const note = experienceNote(identity.group);
+      const js = 'const fs=require("fs"),p=process.env.DSH_EDUCODER_SHARED_ROOT+"/解题经验.md",n=process.argv[1];'
+        + 'const c=fs.existsSync(p)?fs.readFileSync(p,"utf8"):"";'
+        + 'if(!c.includes(n))fs.appendFileSync(p,"- "+n+"\\n");'
+        + 'console.log("EXP_WRITE_OK="+(c.includes(n)?"skipped_dup":"appended"));';
+      const cmd = `node -e '${js}' ${JSON.stringify(note)} # EXP_WRITE_DONE`;
+      return stream(response, input, '', bashCall('Record reusable experience', cmd, identity, '_exp'));
     }
-    const toolResult = input.messages.find(message => message.role === 'tool' && message.tool_call_id?.endsWith('_passed'));
-    if (!toolResult || !JSON.stringify(toolResult.content).includes(identity.workspace === 'alice' ? 'true' : 'false')) return reject(response);
+    const expResult = input.messages.find(message => message.role === 'tool' && message.tool_call_id?.endsWith('_exp'));
+    const expectedFlag = identity.workspace === 'alice' ? 'EXP_WRITE_OK=appended' : 'EXP_WRITE_OK=skipped_dup';
+    if (!expResult || !JSON.stringify(expResult.content).includes(expectedFlag)) return reject(response);
     identity.experienceVerified = true;
   }
   return stream(response, input, '模拟平台已返回评测结果。');
 }
 
-function stagedModel(response, input, identity, names) {
+function stagedModel(response, input, identity, names, nativeOk) {
   const { messages, prompt_cache_key: affinity } = input;
   const stage = identity.index;
   const step = identity.modelCalls;
@@ -459,12 +494,11 @@ function stagedModel(response, input, identity, names) {
   const historyRetained = stage === 0 || messages.some(message => message.role === 'user' &&
     Array.isArray(message.content) && message.content.some(part => part.image_url?.url === historicalPng));
   const expectedAffinity = identity.affinity ?? (stage === 1 ? other.affinity : affinity);
-  if (typeof affinity !== 'string' || affinity !== expectedAffinity || !names.includes('read') || !names.includes('bash') ||
-      !['educoder_read_file', 'educoder_save_file', 'educoder_evaluate'].every(name => names.includes(name)) ||
+  if (typeof affinity !== 'string' || affinity !== expectedAffinity || !nativeOk ||
       !Array.isArray(currentPrompt?.content) || !currentPrompt.content.some(part => part.image_url?.url === png) ||
       !historyRetained || JSON.stringify(messages).includes(identity.session) || JSON.stringify(messages).includes(identity.proof)) {
     console.error('多关卡模型请求验证失败。', JSON.stringify({ stage, step, hasAffinity: typeof affinity === 'string',
-      affinityMatches: affinity === expectedAffinity, nativeRead: names.includes('read'), nativeBash: names.includes('bash'),
+      affinityMatches: affinity === expectedAffinity, nativeOk, nativeRead: names.includes('read'), nativeBash: names.includes('bash'),
       currentImage: currentPrompt?.content?.some?.(part => part.image_url?.url === png) === true,
       historyRetained }));
     return reject(response);
@@ -474,15 +508,31 @@ function stagedModel(response, input, identity, names) {
   identity.imageRequests++;
   const prefix = stage === 0 ? [
     [true, 'read', { file_path: 'native-fixture.txt' }],
-    [latest.includes('NATIVE_EDUCODER_FILE_4GV8'), 'educoder_read_file', { path: identity.codePath }],
+    [latest.includes('NATIVE_EDUCODER_FILE_4GV8'), 'bash', {
+      description: 'Read stage 1 code via CLI',
+      command: `node "$DSH_EDUCODER_CLI" read-file ${identity.codePath}`,
+    }],
   ] : [
-    [other.passed, 'educoder_read_file', { path: other.codePath }],
-    [latest.includes('EduCoder 工具未完成'), 'educoder_read_file', { path: identity.codePath }],
+    [other.passed, 'bash', {
+      description: 'Verify previous stage path is rejected by CLI',
+      command: `node "$DSH_EDUCODER_CLI" read-file ${other.codePath}`,
+    }],
+    [latest.includes('[educoder-cli error]'), 'bash', {
+      description: 'Read stage 2 code via CLI',
+      command: `node "$DSH_EDUCODER_CLI" read-file ${identity.codePath}`,
+    }],
   ];
+  const saveCmd = `cat <<'EOF' | node "$DSH_EDUCODER_CLI" save-file ${identity.codePath} --stdin\n${identity.solution}EOF`;
   const actions = [
     ...prefix,
-    [latest.includes(identity.key + ' starter'), 'educoder_save_file', { path: identity.codePath, content: identity.solution }],
-    [latest.includes('saved'), 'educoder_evaluate', {}],
+    [latest.includes(identity.key + ' starter'), 'bash', {
+      description: 'Save stage solution via CLI',
+      command: saveCmd,
+    }],
+    [latest.includes('已保存远程文件'), 'bash', {
+      description: 'Evaluate stage solution via CLI',
+      command: 'node "$DSH_EDUCODER_CLI" evaluate',
+    }],
     [identity.passed && latest.includes('passed')],
   ];
   const [ok, name, args] = actions[step] ?? [];

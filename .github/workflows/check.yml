@@ -68,7 +68,7 @@ jobs:
           cp deploy/educoder/educoder-fixture-model.patch.yml deploy/educoder/fixtures/
           cd deploy/educoder
           docker compose -f compose.yaml -f compose.educoder-fixture.yaml up -d --wait --wait-timeout 120
-          docker compose exec -T dsh dsh plugin --profile web add --ignore-scripts --save-exact /opt/educoder-packages/forst-dsh-toolkit-0.2.0.tgz /opt/educoder-packages/forst-dsh-educoder-0.1.14.tgz
+          docker compose exec -T dsh dsh plugin --profile web add --ignore-scripts --save-exact /opt/educoder-packages/forst-dsh-toolkit-0.2.0.tgz /opt/educoder-packages/forst-dsh-educoder-0.2.0.tgz
           docker compose -f compose.yaml -f compose.educoder-fixture.yaml up -d --force-recreate --wait --wait-timeout 120
       - name: 核验真实 DSH Session 与浏览器界面
         working-directory: deploy/educoder

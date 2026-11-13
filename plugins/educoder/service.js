@@ -40,6 +40,7 @@ export function createService({
     inspectBrowser,
     experience,
     extended: extendedMode,
+    nativeTools,
     readSaveEvidence,
     pollMs,
     pollAttempts,

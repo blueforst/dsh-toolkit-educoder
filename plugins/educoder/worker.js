@@ -216,6 +216,8 @@ export function createWorkers({ transport, accounts, runAgent, inspectBrowser, e
               return { status: 'pending', feedback: '平台尚未确认选择题评测结果。' };
             }, toolSignal) : undefined;
           let result;
+          const priorMarker = remote.marker;
+          const priorFailedVerdict = remote.failedVerdict;
           const { sessionResume, sessionResumeTransfer } = current();
           result = await runAgent({
             title: redactSession(remote.title, session),
@@ -228,6 +230,17 @@ export function createWorkers({ transport, accounts, runAgent, inspectBrowser, e
             paths: remote.paths,
             questions: remote.questions,
             kind: unsupported ? 'browser' : remote.kind,
+            courseId: task.courseId,
+            homeworkId: task.homeworkId,
+            binding,
+            workdirKey: `${task.accountId}-${task.id}`,
+            session: {
+              remoteUserId: session.remoteUserId,
+              session: session.session,
+              autologin: session.autologin,
+              zzud: session.zzud,
+            },
+            terminalAvailable: Boolean(remote.terminalAvailable),
             submitChoices,
             ...(inspectBrowser && (unsupported || remote.imagesUnavailable) ? { inspectBrowser: async active => {
               const page = await inspectBrowser({ session, binding, signal: active });
@@ -314,6 +327,11 @@ export function createWorkers({ transport, accounts, runAgent, inspectBrowser, e
             return { status: 'manual', code: result.code };
           }
           remote = await transport.inspect(session, bound, { signal });
+          if (remote.evaluating) {
+            const observed = await readVerdict(session, bound, priorMarker, signal, priorFailedVerdict);
+            if (!observed) return { status: 'failed', code: 'verification_pending' };
+            remote = observed;
+          }
           const sessionResumeSuccessor = extendedMode && remote.state === 'passed' && result.sessionResume?.scopeKey
             ? remote.nextTaskId : undefined;
           checkpoint({
@@ -324,7 +342,10 @@ export function createWorkers({ transport, accounts, runAgent, inspectBrowser, e
           });
           if (remote.state !== 'passed') {
             if (unsupported) return { status: 'manual', code: unsupported };
-            if (lastEvaluation === 'failed') return { status: 'failed', code: 'verification_failed' };
+            const failedVerification = lastEvaluation === 'failed' ||
+              failedAfter(remote, priorMarker) ||
+              Boolean(remote.failedVerdict && remote.failedVerdict !== priorFailedVerdict);
+            if (failedVerification) return { status: 'failed', code: 'verification_failed' };
             const code = ['timeout', 'budget'].includes(result.status) ? result.status : 'agent_failed';
             return { status: 'failed', code };
           }

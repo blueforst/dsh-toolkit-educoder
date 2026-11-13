@@ -545,7 +545,7 @@ test('代码题保存成功清除 write 检查点，辅助终端断连不锁死�
   assert.equal(stage.files.get('src/main.py'), 'final-code');
 });
 
-test('仅在不支持接口或题面缺图时向下层 Agent 暴露 educoder_browser', { timeout: 8000 }, async t => {
+test('仅在不支持接口或题面缺图时向 Agent 启用浏览器网页查看', { timeout: 8000 }, async t => {
   const manualStage = exercise('a', 1, { kind: 'manual' });
   const overflowImageStage = exercise('b', 1, { imagesUnavailable: true });
   let manualBrowser = false;
@@ -572,4 +572,38 @@ test('仅在不支持接口或题面缺图时向下层 Agent 暴露 educoder_bro
   await Promise.all([expectState(queue, t1.id, 'passed'), expectState(queue, t2.id, 'passed')]);
   assert.equal(manualBrowser, true);
   assert.equal(overflowBrowser, true);
+});
+
+test('CLI 模式通过平台接口直接保存并触发评测时，worker 能接收上下文、轮询在途评测并识别失败或通过', { timeout: 8000 }, async t => {
+  const stagePassed = exercise('a', 1);
+  const stageFailed = exercise('b', 1);
+  let inspectCountPassed = 0;
+  stagePassed.onInspect = () => {
+    if (stagePassed.evaluating && ++inspectCountPassed >= 2) {
+      stagePassed.evaluating = false;
+      stagePassed.state = 'passed';
+    }
+  };
+  const { open } = fixture(t, [stagePassed, stageFailed], async run => {
+    assert.ok(run.session?.session);
+    assert.ok(run.binding?.taskId);
+    assert.equal(run.courseId, run.binding.courseId);
+    assert.equal(run.homeworkId, run.binding.homeworkId);
+    if (run.accountRef === 'a') {
+      stagePassed.files.set('src/main.py', 'cli-saved');
+      stagePassed.evaluating = true;
+    } else {
+      stageFailed.marker = String(Number(stageFailed.marker || '0') + 1);
+      stageFailed.state = 'failed';
+      stageFailed.failedVerdict = 'cli-failed-verdict';
+    }
+    return { status: 'finished' };
+  }, { pollMs: 10, pollAttempts: 5 });
+
+  const queue = open();
+  const [t1, t2] = queue.enqueueBatch([scopes.a, scopes.b], { start: true });
+  const [r1, r2] = await Promise.all([expectState(queue, t1.id, 'passed'), expectState(queue, t2.id, 'failed')]);
+  assert.equal(r1.status, 'passed');
+  assert.equal(stagePassed.files.get('src/main.py'), 'cli-saved');
+  assert.equal(r2.code, 'verification_failed');
 });
