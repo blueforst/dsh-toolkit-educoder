@@ -1,0 +1,24 @@
+{
+  "name": "@forst/dsh-educoder",
+  "version": "0.1.0",
+  "description": "在专用 DSH Web 实例中管理独立的 EduCoder 账号、作业和评测队列。",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": ["*.js", "cordis.patch.yml", "README.md", "LICENSE"],
+  "engines": {"node": ">=24.9", "dsh": "0.2.2-alpha.2"},
+  "dsh": {
+    "bundle": {"patch": "./cordis.patch.yml"},
+    "client": {
+      "platform": "web",
+      "inject": ["@deepseek-ai/dsh-client-modules", "@deepseek-ai/dsh-client-ui-layout", "@deepseek-ai/dsh-client-ui-sidebar", "@deepseek-ai/dsh-client-ui-workspace"]
+    }
+  },
+  "license": "MIT",
+  "repository": {"type": "git", "url": "https://github.com/blueforst/dsh-toolkit-educoder.git", "directory": "plugins/educoder"}
+}

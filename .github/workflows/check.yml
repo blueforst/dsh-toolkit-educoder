@@ -37,12 +37,46 @@ jobs:
           npm run build
           npm run check
           npm test
+          node tests/educoder-soak.mjs --duration-ms 4000
           python3 scripts/audit-release.py
           git diff --exit-code -- client.js
           mkdir -p dist
           npm pack --pack-destination dist
+          npm pack ./plugins/educoder --pack-destination dist
+          sha256sum dist/*.tgz > dist/SHA256SUMS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: dsh-toolkit-server-0.2.0
-          path: server/dist/*.tgz
+          name: dsh-toolkit-educoder-installers
+          path: |
+            server/dist/*.tgz
+            server/dist/SHA256SUMS
           if-no-files-found: error
+  isolated-web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.22.1'
+      - name: 打包并启动隔离的 DSH 和 EduCoder 替身
+        run: |
+          mkdir -p deploy/educoder/{packages,fixtures}
+          npm pack --pack-destination deploy/educoder/packages
+          npm pack ./plugins/educoder --pack-destination deploy/educoder/packages
+          cp tests/fixtures/educoder-integration.mjs tests/educoder-web-smoke.mjs tests/educoder-client.test.mjs deploy/educoder/fixtures/
+          cp deploy/educoder/educoder-fixture-model.patch.yml deploy/educoder/fixtures/
+          cd deploy/educoder
+          docker compose -f compose.yaml -f compose.educoder-fixture.yaml up -d --wait --wait-timeout 120
+          docker compose exec -T dsh dsh plugin --profile web add --ignore-scripts --save-exact /opt/educoder-packages/forst-dsh-toolkit-0.2.0.tgz /opt/educoder-packages/forst-dsh-educoder-0.1.0.tgz
+          docker compose -f compose.yaml -f compose.educoder-fixture.yaml up -d --force-recreate --wait --wait-timeout 120
+      - name: 核验真实 DSH Session 与浏览器界面
+        working-directory: deploy/educoder
+        run: |
+          bash smoke-educoder-fixture.sh
+          bash smoke-educoder-fixture.sh --browser
+          bash smoke-credential-boundary.sh
+      - name: 停止验收实例
+        if: always()
+        working-directory: deploy/educoder
+        run: docker compose -f compose.yaml -f compose.educoder-fixture.yaml down

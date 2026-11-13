@@ -1,0 +1,32 @@
+# 仅用于隔离验收。EduCoder 与模型替身通过 DSH 的回环接口访问。
+services:
+  dsh:
+    environment:
+      DSH_METRICS_URL: http://127.0.0.1:9299/metrics
+      DSH_EDUCODER_API_URL: http://127.0.0.1:9299/api
+      DSH_EDUCODER_FIXTURE_API_KEY: local-fixture
+      DSH_EDUCODER_DEDICATED: "1"
+    command:
+      - web
+      - --patch
+      - /opt/deepseek-harness/web.cordis.patch.yml
+      - --patch
+      - /opt/educoder-deployment/workspace.patch.yml
+      - --patch
+      - /opt/educoder-fixtures/educoder-fixture-model.patch.yml
+      - --patch
+      - /opt/educoder-deployment/credential-boundary.patch.yml
+      - --no-open
+    volumes:
+      - ./fixtures:/opt/educoder-fixtures:ro
+  edu-fixture:
+    image: ghcr.io/runzhliu/deepseek-harness:0.2.2-alpha.2-r1@sha256:8cbd24d0cf0d26e5fdcd1b310e1a95e95bfc6c4d708784b08f142bd5740134bf
+    entrypoint: [node, /opt/educoder-fixtures/educoder-integration.mjs]
+    network_mode: service:dsh
+    volumes:
+      - ./fixtures:/opt/educoder-fixtures:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m

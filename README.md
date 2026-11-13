@@ -1,5 +1,7 @@
 # DSH Toolkit · Linux 服务器版
 
+本仓库是 [blueforst/dsh-toolkit](https://github.com/blueforst/dsh-toolkit) 的独立派生项目，保留上游提交历史、许可证和原 Toolkit 软件包。EduCoder 是独立安装的可选插件 `@forst/dsh-educoder`，提供账号隔离、课程和作业选择、持久队列以及在 DSH Session 中运行的受限评测工作流。安装与隔离验收见 [EduCoder 开发实例部署](deploy/educoder/README.md)。
+
 面向 Linux 服务器的 DSH 插件包：**服务器资源、OpenCode Go 月额度、Pi 会话费用**。另附 **Camoufox 指纹浏览器运行时**、**Linux 完整桌面与 Computer Use**及 **OpenCode Go 模型配置示例**。
 
 从 **0.2.0** 起，本机通用功能已分离到 [dsh-toolkit-local](https://github.com/blueforst/dsh-toolkit-local)。个人电脑只需要额度与费用增强时，安装本机版即可；浏览器和 CUA 使用 DSH 原生能力。
