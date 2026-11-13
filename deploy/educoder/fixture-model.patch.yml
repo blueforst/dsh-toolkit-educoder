@@ -1,0 +1,23 @@
+- id: llm-pi-ai
+  config:
+    providers:
+      opencode-go:
+        displayName: 本地验收替身
+        apiKeyEnv: DSH_EDUCODER_FIXTURE_API_KEY
+        api: openai-completions
+        baseURL: http://fixture:9199/v1
+        compat:
+          supportsStore: false
+          supportsDeveloperRole: false
+          supportsUsageInStreaming: true
+          maxTokensField: max_tokens
+        models:
+          - id: deepseek-v4.1-flash
+            name: DeepSeek V4.1 Flash
+            input: [text]
+            contextWindow: 1000000
+            maxTokens: 384000
+- id: agent-default-model
+  config:
+    provider: opencode-go
+    model: deepseek-v4.1-flash

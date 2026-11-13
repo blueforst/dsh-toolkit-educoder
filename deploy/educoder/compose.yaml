@@ -1,0 +1,53 @@
+name: dsh-educoder-dev
+services:
+  dsh:
+    image: ghcr.io/runzhliu/deepseek-harness:0.2.2-alpha.2-r1@sha256:8cbd24d0cf0d26e5fdcd1b310e1a95e95bfc6c4d708784b08f142bd5740134bf
+    command:
+      - web
+      - --patch
+      - /opt/deepseek-harness/web.cordis.patch.yml
+      - --patch
+      - /opt/educoder-deployment/workspace.patch.yml
+      - --no-open
+    ports:
+      - "127.0.0.1:${DSH_EDUCODER_WEB_PORT:-13080}:3080"
+    environment:
+      DSH_TELEMETRY_DISABLED: "1"
+      DSH_DESKTOP_ENABLED: "0"
+      DSH_BROWSER_USE_ENABLED: "0"
+    volumes:
+      - dsh-home:/home/node/.dsh
+      - workspace:/workspace
+      - ./packages:/opt/educoder-packages:ro
+      - ./workspace.patch.yml:/opt/educoder-deployment/workspace.patch.yml:ro
+      - ./credential-boundary.patch.yml:/opt/educoder-deployment/credential-boundary.patch.yml:ro
+      - ./credential-boundary.mjs:/opt/educoder-deployment/credential-boundary.mjs:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 3g
+    memswap_limit: 4g
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3080/').then(r => { if (r.status !== 401) process.exitCode = 1 }).catch(() => { process.exitCode = 1 })"
+      interval: 5s
+      timeout: 3s
+      start_period: 20s
+      retries: 5
+
+volumes:
+  dsh-home:
+  workspace:

@@ -1,0 +1,30 @@
+services:
+  dsh:
+    environment:
+      DSH_METRICS_URL: http://fixture:9199/metrics
+      DSH_EDUCODER_FIXTURE_API_KEY: local-fixture
+    command:
+      - web
+      - --patch
+      - /opt/deepseek-harness/web.cordis.patch.yml
+      - --patch
+      - /opt/educoder-deployment/workspace.patch.yml
+      - --patch
+      - /opt/educoder-fixtures/fixture-model.patch.yml
+      - --no-open
+    volumes:
+      - ./fixtures:/opt/educoder-fixtures:ro
+    depends_on:
+      - fixture
+  fixture:
+    image: ghcr.io/runzhliu/deepseek-harness:0.2.2-alpha.2-r1@sha256:8cbd24d0cf0d26e5fdcd1b310e1a95e95bfc6c4d708784b08f142bd5740134bf
+    entrypoint: [node, /opt/educoder-fixtures/fixture-server.mjs]
+    environment:
+      FIXTURE_HOST: 0.0.0.0
+    volumes:
+      - ./fixtures:/opt/educoder-fixtures:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m

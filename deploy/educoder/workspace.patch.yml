@@ -1,0 +1,3 @@
+- id: workspace-controller
+  config:
+    documentsDirectory: /workspace
