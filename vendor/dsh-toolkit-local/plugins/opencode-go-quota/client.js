@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
 
     function useSample(wide, endpoint, scope, intervalMs = 1000) {
       const [sample, setSample] = React.useState(null);
-      const [unavailable, setUnavailable] = React.useState(false);
+      const [unavailable, setUnavailable] = React.useState(null);
       React.useEffect(() => {
         if (!wide) return;
         let disposed = false;
@@ -21,12 +21,16 @@ window.__ModuleLoader__.load({
           const timeout = window.setTimeout(() => controller.abort(), 6500);
           try {
             const response = await fetch(endpoint, { cache: 'no-store', signal: controller.signal });
-            if (!response.ok) throw new Error('数据暂不可用');
+            if (!response.ok) {
+              const error = response.status === 503 ? await response.json() : null;
+              if (!disposed) setUnavailable(error?.code === 'missing-credential' ? '未配置 OpenCode Go API Key' : '暂时无法读取额度');
+              return;
+            }
             const data = await response.json();
             if (data.scope !== scope || !Number.isFinite(data.timestamp)) throw new Error('数据格式无效');
-            if (!disposed) { setSample(data); setUnavailable(false); }
+            if (!disposed) { setSample(data); setUnavailable(null); }
           } catch {
-            if (!disposed) setUnavailable(true);
+            if (!disposed) setUnavailable('暂时无法读取额度');
           } finally { window.clearTimeout(timeout); pending = false; }
         }
         refresh();
@@ -39,7 +43,7 @@ window.__ModuleLoader__.load({
           document.removeEventListener('visibilitychange', refresh);
         };
       }, [wide, endpoint, scope, intervalMs]);
-      return { sample, stale: unavailable || !sample || Date.now() - sample.timestamp > Math.max(10000, intervalMs * 2 + 5000) };
+      return { sample, unavailable, stale: Boolean(unavailable) || !sample || Date.now() - sample.timestamp > Math.max(10000, intervalMs * 2 + 5000) };
     }
 
     function MetricBar({ label, value, stale, detail, suffix, ariaLabel, precision = 1 }) {
@@ -53,13 +57,13 @@ window.__ModuleLoader__.load({
         h('div', {
           role: 'progressbar', 'aria-label': ariaLabel, 'aria-valuemin': 0, 'aria-valuemax': 100,
           'aria-valuenow': stale ? undefined : numeric ?? undefined,
-          'aria-valuetext': stale ? '数据暂不可用' : text,
+          'aria-valuetext': stale ? detail : text,
           style: { height: '5px', marginTop: '5px', borderRadius: '999px', overflow: 'hidden', background: 'var(--dsw-alias-border-l2,#e5e7eb)' },
         }, h('div', { style: { height: '100%', width: `${numeric ?? 0}%`, borderRadius: '999px', background: stale ? '#94a3b8' : colorFor(numeric), transition: 'width .4s ease,background-color .2s ease' } })),
-        detail ? h('div', { style: { marginTop: '4px', fontSize: '11px', lineHeight: '14px', opacity: .55, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' } }, stale ? '等待更新' : detail) : null);
+        detail ? h('div', { style: { marginTop: '4px', fontSize: '11px', lineHeight: '14px', opacity: .55, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' } }, detail) : null);
     }
 
-    function QuotaSection({ wide, stale, children }) {
+    function QuotaSection({ wide, stale, detail, children }) {
       const rootRef = React.useRef(null);
       React.useLayoutEffect(() => {
         if (!wide || !rootRef.current) return;
@@ -86,7 +90,7 @@ window.__ModuleLoader__.load({
         'data-dsh-opencode-go-quota': 'true',
         'data-placement': 'sidebar', 'data-state': stale ? 'unavailable' : 'ready',
         'aria-label': 'OpenCode Go 月额度',
-        title: stale ? '数据暂不可用' : 'OpenCode Go 官方本月已用额度，每 60 秒刷新',
+        title: stale ? detail : 'OpenCode Go 官方本月已用额度，每 60 秒刷新',
         style: {
           boxSizing: 'border-box', width: '100%', flex: '0 0 100%', padding: '10px 12px 12px', marginBottom: '4px',
           display: 'flex', flexDirection: 'column', gap: '11px', color: 'var(--dsw-alias-label-primary,#172033)',
@@ -96,11 +100,12 @@ window.__ModuleLoader__.load({
     }
 
     function OpenCodeQuota({ wide }) {
-      const { sample, stale } = useSample(wide, '/opencode-go-quota', 'opencode-go-monthly', 60000);
+      const { sample, stale, unavailable } = useSample(wide, '/opencode-go-quota', 'opencode-go-monthly', 60000);
       const monthly = sample?.monthly;
-      return h(QuotaSection, { wide, stale }, h(MetricBar, {
+      const detail = unavailable ?? (stale ? '等待更新' : '本月已使用');
+      return h(QuotaSection, { wide, stale, detail }, h(MetricBar, {
         label: 'OpenCode Go', value: monthly?.percent, stale, ariaLabel: 'OpenCode Go 本月已用额度',
-        detail: '本月已使用', precision: 0,
+        detail, precision: 0,
       }));
     }
 

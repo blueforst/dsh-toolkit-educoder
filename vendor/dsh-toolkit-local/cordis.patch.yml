@@ -1,3 +1,7 @@
 - insert:
-    - id: dsh-toolkit-local
-      name: '@forst/dsh-toolkit-local'
+    - id: forst-opencode-go-quota
+      name: ./plugins/opencode-go-quota/index.js
+    - id: forst-session-billing
+      name: ./plugins/session-billing/index.js
+    - id: forst-web-search-tavily
+      name: ./plugins/web-search-tavily/index.js

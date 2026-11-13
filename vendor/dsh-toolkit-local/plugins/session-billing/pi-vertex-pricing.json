@@ -1,0 +1,10 @@
+{
+  "source": "https://pi.dev/api/models/providers/google-vertex?types=chat",
+  "lastModified": "2026-11-13T13:56:55Z",
+  "etag": "eb0603b07016a3e7fec4d77a4d6636c4",
+  "projectionVersion": 3,
+  "models": {
+    "gemini-4-carbon": { "input": 2, "output": 10, "cacheRead": 0.1, "cacheWrite": 0 },
+    "gemini-4-hydrogen": { "input": 1.5, "output": 7.5, "cacheRead": 0.075, "cacheWrite": 0 }
+  }
+}

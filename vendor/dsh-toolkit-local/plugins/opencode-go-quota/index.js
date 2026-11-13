@@ -1,6 +1,13 @@
 export const name = 'opencode-go-quota';
 export const inject = ['webServer', 'connection'];
 
+const keyRef = 'OPENCODE_GO_API_KEY';
+
+function sendUnavailable(req, res, body) {
+  res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(req.method === 'HEAD' ? undefined : JSON.stringify(body));
+}
+
 export function apply(ctx) {
   function admitted(req, res) {
     const rejection = ctx.connection.requestRejection(req);
@@ -18,8 +25,9 @@ export function apply(ctx) {
     if (Date.now() < nextQuotaAttempt) throw new Error('额度暂不可用');
     quotaPending = (async () => {
       try {
-        const key = process.env.OPENCODE_GO_API_KEY;
-        if (!key) throw new Error('未配置额度凭据');
+        const credentials = ctx.get('credentials');
+        const key = credentials ? (await credentials.resolve(keyRef))?.value : process.env[keyRef];
+        if (!key?.trim()) return null;
         const response = await fetch('https://opencode.ai/inference/go/v1/usage', {
           headers: { Authorization: `Bearer ${key}`, Accept: 'application/json', 'User-Agent': 'opencode/2.1.2' },
           signal: AbortSignal.timeout(5000),
@@ -52,12 +60,16 @@ export function apply(ctx) {
         return;
       }
       try {
-        const body = JSON.stringify(await readQuota());
+        const sample = await readQuota();
+        if (sample === null) {
+          sendUnavailable(req, res, { error: '未配置 OpenCode Go API Key', code: 'missing-credential' });
+          return;
+        }
+        const body = JSON.stringify(sample);
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Length': Buffer.byteLength(body) });
         res.end(req.method === 'HEAD' ? undefined : body);
       } catch {
-        res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-        res.end(req.method === 'HEAD' ? undefined : JSON.stringify({ error: 'OpenCode Go 月额度暂不可用' }));
+        sendUnavailable(req, res, { error: 'OpenCode Go 月额度暂不可用' });
       }
     },
   }), 'opencode-go-quota: HTTP');

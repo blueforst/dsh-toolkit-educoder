@@ -1,8 +1,15 @@
 {
   "name": "@forst/dsh-opencode-go-quota",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
-  "description": "本机与服务器共用的 OpenCode Go 月额度模块。",
+  "description": "侧栏显示 OpenCode Go 月额度。",
+  "exports": { "./client": "./client.js" },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": ["@deepseek-ai/dsh-client-ui-layout", "@deepseek-ai/dsh-client-ui-sidebar"]
+    }
+  },
   "license": "MIT"
 }

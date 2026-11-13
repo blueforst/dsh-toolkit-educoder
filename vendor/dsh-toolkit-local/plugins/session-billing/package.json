@@ -3,6 +3,16 @@
   "version": "0.1.4",
   "private": true,
   "type": "module",
-  "description": "统一插件包内的源码模块；版本字段记录原独立实现基线。",
+  "description": "在会话输入框显示 Pi 估算费用。",
+  "exports": { "./client": "./client.js" },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-session", "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat", "@deepseek-ai/dsh-client-ui-primitives"
+      ]
+    }
+  },
   "license": "MIT"
 }

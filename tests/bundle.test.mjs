@@ -43,8 +43,9 @@ test('服务器入口只额外挂资源监控，额度和费用由固定通用�
   assert(manifest.files.includes('vendor'), '发行包必须内含固定版本的通用模块');
   assert.equal(Object.keys(manifest.dependencies ?? {}).length, 0, '安装不需要临时抓取本机仓库最新分支');
   const server = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
-  assert(server.includes("./vendor/dsh-toolkit-local/index.js"));
-  assert(!server.includes('./plugins/session-billing/'));
+  assert(server.includes("./vendor/dsh-toolkit-local/plugins/opencode-go-quota/index.js"));
+  assert(server.includes("./vendor/dsh-toolkit-local/plugins/session-billing/index.js"));
+  assert(!server.includes('web-search-tavily'));
   const metrics = readFileSync(new URL('../plugins/server-metrics/index.js', import.meta.url), 'utf8');
   assert(!metrics.includes('OPENCODE_GO_API_KEY'));
   assert(!metrics.includes('/opencode-go-quota'));

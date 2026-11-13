@@ -1,7 +1,7 @@
 {
   "repository": "blueforst/dsh-toolkit-local",
-  "commit": "abee8771157880957999b1a4f6723a002b7edf51",
-  "version": "0.1.0",
+  "commit": "90479853356c99b1f123ec7ff609c01f2c0c4522",
+  "version": "0.1.3",
   "files": [
     {
       "path": "LICENSE",
@@ -12,32 +12,28 @@
       "sha256": "3d4bb418485f578d38ea2223d7f9cce53fce39046c47379e519a8e3da183069a"
     },
     {
-      "path": "client.js",
-      "sha256": "e37a57c49ebeeb046d2589102baee9435b9b04c78ba376bf57a7d8df5c31ac7b"
-    },
-    {
       "path": "cordis.patch.yml",
-      "sha256": "af024bcd1fd84410ff66cf962246022e490df30268d265ab3305c757a68763b8"
+      "sha256": "63ebdd1b2ee7a82202607fac1384edbcf4a6444c00bca57444121bb8e83ce159"
     },
     {
       "path": "index.js",
-      "sha256": "facb66457b319ea0845ea5150f722dad1d181ac3d82bfe2a10cba6b52672dd20"
+      "sha256": "5a8ff2eb3dba7cb63c4834af8f829cee86e5970e591a92208e376b45736ced43"
     },
     {
       "path": "package.json",
-      "sha256": "b01669e9704ed716bf148f30062336cb84ad5fc7b565200993eb83a004ad38d4"
+      "sha256": "343fab007ce33a80d368119182c52c8510569c397cd56fae77fe662632b83292"
     },
     {
       "path": "plugins/opencode-go-quota/client.js",
-      "sha256": "365e26847cc06780461ac735b9272ff472baac96e7cde36796bf40421ab5cc82"
+      "sha256": "9de4e1b0b02c211125d8c570a74cdae25cb7c07b80315f75800c609e6ebb7e41"
     },
     {
       "path": "plugins/opencode-go-quota/index.js",
-      "sha256": "f8526ffc92754ecadf84a8fa37682cc7f974075a079b9d7cb62733f1aad96aba"
+      "sha256": "aa2c737eb4f6e1262475b871473bfdbe2f97ea15b3405591b79cc9d2a0cc34fe"
     },
     {
       "path": "plugins/opencode-go-quota/package.json",
-      "sha256": "1502ad5eb33e6b8884d548451887b03a641614c38e7f4732bf089d7ea9587946"
+      "sha256": "6dbf38460005a544959794300ad1de8eb84a63dd8b6c6f31b57a8645e9585fef"
     },
     {
       "path": "plugins/session-billing/client.js",
@@ -49,11 +45,15 @@
     },
     {
       "path": "plugins/session-billing/package.json",
-      "sha256": "893255a2b28a52729862aad57a5050f60659265dec6b2bb31783466b1e8ff93e"
+      "sha256": "c69ce6ec8503fd1c88e58cfa8372df26714dc11b0a681586473c9c6e1079ef61"
+    },
+    {
+      "path": "plugins/session-billing/pi-vertex-pricing.json",
+      "sha256": "937edb2a9a7c3f31e1ecd2c1341d0b89b5e2110e2a4c390411dff6eafd396e4d"
     },
     {
       "path": "plugins/session-billing/projection.js",
-      "sha256": "e02c6443d605a7044d03eaf8718faecd2e0bdbc01790882b670665a6d0196e4c"
+      "sha256": "854d525cb98ab9f2e8e20fe066324d0987e1cde0ae817cc68e48db507a5fc44c"
     },
     {
       "path": "plugins/session-billing/runtime.js",

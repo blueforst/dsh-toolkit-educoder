@@ -19,7 +19,7 @@ const rootFiles = new Set(['index.js', 'client.js', 'package.json', 'cordis.patc
 const pluginFilePattern = /^plugins\/(?:opencode-go-quota|session-billing)\/[A-Za-z0-9][A-Za-z0-9._-]*\.(?:js|json)$/;
 const allowedDirectories = new Set(['plugins', 'plugins/opencode-go-quota', 'plugins/session-billing']);
 const requiredFiles = [
-  ...rootFiles,
+  ...[...rootFiles].filter(path => path !== 'client.js'),
   'plugins/opencode-go-quota/index.js', 'plugins/opencode-go-quota/client.js', 'plugins/opencode-go-quota/package.json',
   'plugins/session-billing/index.js', 'plugins/session-billing/client.js', 'plugins/session-billing/package.json',
   'plugins/session-billing/projection.js', 'plugins/session-billing/runtime.js',

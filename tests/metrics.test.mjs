@@ -21,7 +21,7 @@ test('Go 月额度共享一分钟缓存，合并并发请求并支持 HEAD', asy
     return { ok: true, json: async () => ({ usage: { monthly: { percent: 8, status: 'ok', resetsAt: '2026-12-01T00:00:00.000Z' } } }) };
   };
   try {
-    const ctx = { effect: callback => callback(), connection: { requestRejection: request => request.rejection }, webServer: { register: route => {
+    const ctx = { get: () => undefined, effect: callback => callback(), connection: { requestRejection: request => request.rejection }, webServer: { register: route => {
       assert(!routes.has(route.path), `路由重复注册：${route.path}`);
       routes.set(route.path, route);
       return () => routes.delete(route.path);

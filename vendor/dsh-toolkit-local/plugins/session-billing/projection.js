@@ -1,3 +1,5 @@
+import vertexRates from './pi-vertex-pricing.json' with { type: 'json' };
+
 const moneyFields = ['usd', 'inputUsd', 'outputUsd', 'cacheReadUsd', 'cacheWriteUsd'];
 const emptyTotals = () => ({ usd: 0, inputUsd: 0, outputUsd: 0, cacheReadUsd: 0, cacheWriteUsd: 0, pricedCalls: 0, unpricedCalls: 0 });
 const validCount = n => Number.isFinite(n) && n >= 0;
@@ -27,6 +29,12 @@ export function createProjection({ z, calculateCost, getBuiltinModels, version }
     if (!models.has(key)) {
       let model;
       try { model = getBuiltinModels(route.provider).find(item => item.id === route.model); } catch {}
+      const fallback = route.provider === 'google-vertex' && Object.hasOwn(vertexRates.models, route.model)
+        ? vertexRates.models[route.model]
+        : undefined;
+      if (fallback && !['input', 'output', 'cacheRead', 'cacheWrite'].some(bucket => model?.cost?.[bucket] > 0)) {
+        model = { ...model, cost: fallback };
+      }
       models.set(key, model);
     }
     const model = models.get(key);
@@ -52,8 +60,8 @@ export function createProjection({ z, calculateCost, getBuiltinModels, version }
   const parts = version.split('.').map(Number);
   return {
     key: 'forstSessionCost',
-    // Pi 版本变化时重算已缓存会话，避免延用旧目录价格。
-    stateVersion: 2_000_000 + parts[0] * 10000 + parts[1] * 100 + parts[2],
+    // 内置 Pi 或补充目录变化时，重放已缓存的会话费用。
+    stateVersion: vertexRates.projectionVersion * 1_000_000 + parts[0] * 10000 + parts[1] * 100 + parts[2],
     stateSchema,
     init: () => ({ totals: emptyTotals(), route: null, last: null }),
     apply(state, event) {

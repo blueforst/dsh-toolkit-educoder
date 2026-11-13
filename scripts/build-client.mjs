@@ -6,7 +6,8 @@ const root = new URL('../', import.meta.url);
 checkSnapshot();
 const inputs = [
   { path: 'plugins/server-metrics/client.js', id: '@forst/dsh-server-metrics' },
-  { path: 'vendor/dsh-toolkit-local/client.js', id: '@forst/dsh-toolkit-local' },
+  { path: 'vendor/dsh-toolkit-local/plugins/opencode-go-quota/client.js', id: '@forst/dsh-opencode-go-quota' },
+  { path: 'vendor/dsh-toolkit-local/plugins/session-billing/client.js', id: '@forst/dsh-session-billing' },
 ];
 const factories = inputs.map(({ path, id }) => {
   let captured;
