@@ -20,6 +20,11 @@ const deniedRoutes = [
   '/api/fileUploads/upload',
   '/api/commands/execute',
   '/api/agentPresets/select',
+  // 公开模拟实例可恢复原生设置浏览。设置写入、文件打开与模型探测仍拒绝。
+  ...['mutate', 'replace', 'update', 'openSettingsDocument'].map(action => '/api/settings/' + action),
+  '/api/credentials/set',
+  '/api/credentials/unset',
+  '/api/llm/discoverModels',
   ...['pick', 'list', 'createDirectory'].map(action => '/api/directoryPicker/' + action),
   ...[
     'create', 'fork', 'prompt', 'updateQueue', 'selectModel', 'initializeDefaultModel',

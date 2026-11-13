@@ -94,9 +94,15 @@ sudo bash smoke-educoder-fixture.sh --browser
 
 API 验收检查登录和 Origin 防护、宿主文件和上传入口阻断、手动创建会话和发送提示的拒绝、账号隔离、跨账号分配拒绝、并行执行、远端读回、重复分配及会话过期恢复。浏览器验收通过 DSH 的原生面板操作两个模拟账号，并打开对应的 DSH 会话。每次业务验收使用新的模拟账号组，并在终端输出脱敏的 JSON 结果。
 
+### 公网模拟实例
+
+公网模拟实例可在凭据隔离补丁之后加载 `public-settings.patch.yml`。同时把它与 `credential-boundary.mjs` 挂载到容器的 `/opt/educoder-deployment/`。从侧边栏底部「更多」进入「设置」，可以查看原生设置和模型目录。设置写入、凭据更新和模型端点探测由服务端拒绝。真实账号实例继续使用独立的严格配置。
+
+公网模拟实例的 Go 月额度可由宿主转发。安装 Toolkit 0.2.1 并按 [额度转发说明](go-quota-relay/README.md) 配置。真实密钥保存在宿主，DSH 读取用量投影。
+
 ### 真实账号开关
 
-真实账号默认关闭。叠加 `compose.credentials.yaml` 会启动独立的 `dsh-educoder-live` 项目，使用单独的凭据和工作区卷，以及宿主回环端口 `13081`。启用前需要在 `DSH_EDUCODER_LIVE_ENV` 指向的受保护文件中设置 `DSH_EDUCODER_LIVE_ACCOUNTS=1`，提供已授权的 `EDUCODER_SIGNING_ACCESS_KEY` 和 `EDUCODER_SIGNING_SECRET_KEY`。同一个环境文件也可引用已配置的 DSH 模型路由。专用实例启动后需要通过运行时的凭据隔离检查。用户只在通过 SSH 隧道打开的 DSH Web 面板输入账号凭据，并在发起真实任务前选定对应账号和作业。当前验收使用模拟账号。权限边界细节见 [凭据隔离](凭据隔离.md)。
+真实账号默认关闭。叠加 `compose.credentials.yaml` 会启动独立的 `dsh-educoder-live` 项目，使用单独的凭据和工作区卷，以及宿主回环端口 `13081`。启用前需要在 `DSH_EDUCODER_LIVE_ENV` 指向的受保护文件中设置 `DSH_EDUCODER_LIVE_ACCOUNTS=1`，提供已授权的 `EDUCODER_SIGNING_ACCESS_KEY` 和 `EDUCODER_SIGNING_SECRET_KEY`。同一个环境文件也可引用已配置的 DSH 模型路由。专用实例启动后需要通过运行时的凭据隔离检查。用户只在通过 SSH 隧道打开的 DSH Web 面板输入账号凭据，并在发起真实任务前选定对应账号和作业。权限边界细节见 [凭据隔离](凭据隔离.md)。
 
 ## 重启、备份和回滚
 

@@ -1,0 +1,31 @@
+[Unit]
+Description=OpenCode Go quota reader for DSH
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+DynamicUser=yes
+LoadCredential=opencode-go.key:/etc/dsh-secrets/opencode-go.key
+Environment=DSH_GO_QUOTA_BIND=172.18.0.1 DSH_GO_QUOTA_CLIENT_NETWORK=172.18.0.0/16
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/dsh-opencode-go-quota.py
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+TasksMax=24
+
+[Install]
+WantedBy=multi-user.target
