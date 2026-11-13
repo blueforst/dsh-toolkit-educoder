@@ -15,7 +15,8 @@ smoke=fixtures/educoder-web-smoke.mjs
 case "${1:-}" in
   '') ;;
   --browser) smoke=fixtures/educoder-client.test.mjs ;;
-  *) printf '用法：%s [--browser]\n' "$0" >&2; exit 2 ;;
+  --vision) smoke=fixtures/educoder-vision-smoke.mjs ;;
+  *) printf '用法：%s [--browser | --vision]\n' "$0" >&2; exit 2 ;;
 esac
 
 {

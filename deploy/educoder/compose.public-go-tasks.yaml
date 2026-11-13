@@ -1,0 +1,9 @@
+# 在 compose.public-live.yaml 与 compose.live-tasks.yaml 后叠加。
+services:
+  dsh:
+    env_file:
+      - ${DSH_EDUCODER_GO_TOKEN_ENV:-/etc/dsh-secrets/educoder-go-model.env}
+    environment:
+      DSH_EDUCODER_PROVIDER: opencode-go-native
+      DSH_EDUCODER_MODEL: deepseek-v4.1-flash
+      DSH_EDUCODER_TERMINAL_ENABLED: "1"

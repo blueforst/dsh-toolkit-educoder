@@ -1,0 +1,48 @@
+# 网关地址应与转发服务的 DSH_GO_MODEL_BIND 一致。
+- id: agent-default-model
+  config:
+    provider: opencode-go-native
+    model: deepseek-v4.1-flash
+- id: llm-pi-ai
+  config:
+    providers:
+      opencode-go:
+        displayName: OpenCode Go
+        apiKeyEnv: DSH_GO_MODEL_TOKEN
+        api: openai-completions
+        baseURL: http://172.18.0.1:9193/v1
+        cacheRetention: long
+        requestImageMaxBytes: 524288
+        maxRequestImageBytes: 2796208
+        compat:
+          supportsStore: false
+          supportsDeveloperRole: false
+          supportsUsageInStreaming: true
+          supportsReasoningEffort: false
+          maxTokensField: max_tokens
+        models:
+          - id: deepseek-v4.1-flash
+            name: DeepSeek V4.1 Flash
+            input: [text, image]
+            contextWindow: 1000000
+            maxTokens: 4096
+      opencode-go-native:
+        displayName: OpenCode Go（DSH）
+        apiKeyEnv: DSH_GO_MODEL_TOKEN
+        api: openai-completions
+        baseURL: http://172.18.0.1:9193/native/v1
+        cacheRetention: long
+        requestImageMaxBytes: 4194304
+        maxRequestImageBytes: 11184828
+        compat:
+          supportsStore: false
+          supportsDeveloperRole: false
+          supportsUsageInStreaming: true
+          supportsReasoningEffort: false
+          maxTokensField: max_tokens
+        models:
+          - id: deepseek-v4.1-flash
+            name: DeepSeek V4.1 Flash
+            input: [text, image]
+            contextWindow: 1000000
+            maxTokens: 4096

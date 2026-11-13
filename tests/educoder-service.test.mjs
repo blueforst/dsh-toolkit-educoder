@@ -10,11 +10,12 @@ const people = [
   { login: 'fixture-second-person', password: 'never-store-password-b', remoteId: '202', courseId: 'course-b', homeworkId: '22' },
 ];
 
-function setup(t, { allowAccounts = true, allowTasks = true, mode = 'disabled' } = {}) {
+function setup(t, { allowAccounts = true, allowTasks = true, mode = 'disabled', assignments } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-educoder-service-')));
   const stored = new Map();
   const state = new Map();
   const authAttempts = [];
+  const inspected = [];
   const transport = {
     async login(login, password) {
       authAttempts.push(login);
@@ -41,7 +42,17 @@ function setup(t, { allowAccounts = true, allowTasks = true, mode = 'disabled' }
       await this.status(session);
       const person = people.find(item => item.remoteId === session.remoteUserId);
       assert.equal(id, person.courseId);
-      return [{ id: person.homeworkId, title: '作业 ' + person.homeworkId, private: session.session }];
+      return assignments?.get(id) ?? [{ id: person.homeworkId, title: '作业 ' + person.homeworkId, private: session.session }];
+    },
+    async inspect(session, { courseId, homeworkId }) {
+      const person = people.find(item => item.remoteId === session.remoteUserId);
+      assert.equal(courseId, person.courseId);
+      inspected.push({ courseId, homeworkId });
+      return { binding: {
+        courseId, homeworkId, remoteUserId: session.remoteUserId,
+        taskId: 'task-' + homeworkId, practiceId: 'practice-' + homeworkId,
+        gameId: homeworkId, challengeId: homeworkId,
+      }, kind: 'manual', state: 'pending' };
     },
   };
   const credentials = {
@@ -62,7 +73,7 @@ function setup(t, { allowAccounts = true, allowTasks = true, mode = 'disabled' }
     rmSync(root, { force: true, recursive: true });
   });
   return {
-    root, stored, state, authAttempts,
+    root, stored, state, authAttempts, inspected,
     api: (action, fields = {}) => service.execute({ action, ...fields }),
     async reopen() {
       await service.close();
@@ -141,7 +152,7 @@ test('拒绝跨账号作业批次且不落盘，删除账号只取消该账号�
 
 test('禁用真实账号时认证和运行请求在访问平台之前被拒绝', async t => {
   const { api, authAttempts, stored } = setup(t, { allowAccounts: false });
-  for (const action of ['addAccount', 'relogin', 'checkAccount', 'courses', 'homeworks', 'allocate']) {
+  for (const action of ['addAccount', 'relogin', 'checkAccount', 'courses', 'homeworks', 'allocate', 'startCourse']) {
     await assert.rejects(api(action, { login: people[0].login, password: people[0].password }), { code: 'live_disabled' });
   }
   for (const command of ['start', 'resume']) {
@@ -161,6 +172,51 @@ test('真实账号的只读实例允许登录和目录读取，拒绝分配和�
   assert.equal((await api('homeworks', { accountId: account.id, courseId: person.courseId })).length, 1);
   assert.deepEqual(await api('settings'), { concurrency: 2, mode: 'live', tasksEnabled: false });
   await assert.rejects(api('allocate', { targets: [target(account, person)], start: true }), { code: 'tasks_disabled' });
+  await assert.rejects(api('startCourse', { accountId: account.id, courseId: person.courseId }), { code: 'tasks_disabled' });
   await assert.rejects(api('control', { command: 'resume', taskIds: [] }), { code: 'tasks_disabled' });
   assert.deepEqual(await api('tasks'), []);
+});
+
+test('课程通关只启动当前账号课程的未完成作业，重复点击不重试已处理任务', async t => {
+  const [owner, other] = people;
+  const completed = { id: '12', title: '已通过', taskCount: 2, passedCount: 2 };
+  const partial = { id: '13', title: '进行中', taskCount: 4, passedCount: 1 };
+  const waiting = { id: '14', title: '待启动', taskCount: 0, passedCount: 0 };
+  const { api, inspected } = setup(t, { assignments: new Map([[owner.courseId, [completed, partial, waiting]]]) });
+  const [first, second] = await Promise.all(people.map(person => bind(api, person)));
+  const selected = { accountId: first.id, courseId: owner.courseId };
+  await assert.rejects(api('startCourse', { ...selected, courseId: other.courseId }), { code: 'invalid_scope' });
+  assert.deepEqual(await api('tasks'), []);
+
+  const [waitingTask, otherTask] = await api('allocate', {
+    targets: [{ ...selected, homeworkId: waiting.id }, target(second, other)],
+  });
+  const result = await api('startCourse', { ...selected, targets: [target(second, other)] });
+  assert.deepEqual({ ...result, tasks: result.tasks.map(task => task.homeworkId) }, {
+    started: 2, skippedCompleted: 1, skippedExisting: 0, tasks: [partial.id, waiting.id],
+  });
+  assert.equal(result.tasks[1].id, waitingTask.id);
+  assert.ok(result.tasks.every(task => task.status === 'queued' && task.courseId === owner.courseId));
+
+  const repeated = await api('startCourse', selected);
+  assert.deepEqual(repeated, { tasks: [], started: 0, skippedCompleted: 1, skippedExisting: 2 });
+  assert.equal((await api('task', { taskId: otherTask.id })).status, 'waiting');
+  assert.ok(inspected.every(task => task.courseId === owner.courseId && task.homeworkId !== completed.id));
+});
+
+test('课程通关支持超过一百份作业，并在全部校验成功后才启动', async t => {
+  const owner = people[0];
+  const homeworks = Array.from({ length: 101 }, (_, index) => ({ id: String(101 + index), title: `作业 ${index + 1}` }));
+  const assignments = new Map([[owner.courseId, [...homeworks, { id: 'bad' }]]]);
+  const { api } = setup(t, { assignments });
+  const account = await bind(api, owner);
+  const selected = { accountId: account.id, courseId: owner.courseId };
+  await assert.rejects(api('startCourse', selected), { code: 'invalid_scope' });
+  assert.deepEqual(await api('tasks'), []);
+
+  assignments.set(owner.courseId, homeworks);
+  const result = await api('startCourse', selected);
+  assert.equal(result.started, 101);
+  assert.equal(result.tasks.length, 101);
+  assert.deepEqual(result.tasks.map(task => task.homeworkId), homeworks.map(task => task.id));
 });

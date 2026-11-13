@@ -7,27 +7,44 @@ import contextlib
 import ipaddress
 import socket
 
-DESTINATION = "data.educoder.net"
 HTTPS_PORT = 443
+DESTINATIONS = {
+    b"data.educoder.net:443": "data.educoder.net",
+    b"www.educoder.net:443": "www.educoder.net",
+    b"www-cdn.educoder.net:443": "www-cdn.educoder.net",
+    b"webssh.educoder.net:443": "webssh.educoder.net",
+    b"prod-attachments.oss-accelerate.aliyuncs.com:443": "prod-attachments.oss-accelerate.aliyuncs.com",
+}
 HEADER_LIMIT = 8192
 MAX_CONNECTIONS = 16
 TUNNEL_TIMEOUT = 45
+CONNECT_TIMEOUT = 10
+DNS_RETRY_DELAY = 0.15
+ADDRESS_CONNECT_TIMEOUT = 4
 
 
-async def connect_educoder():
+async def connect_educoder(destination):
     loop = asyncio.get_running_loop()
-    results = await loop.getaddrinfo(
-        DESTINATION, HTTPS_PORT, family=socket.AF_INET, type=socket.SOCK_STREAM
-    )
-    for address in dict.fromkeys(result[4][0] for result in results):
-        if not ipaddress.ip_address(address).is_global:
-            continue
+    tried = set()
+    for attempt in range(2):
+        if attempt:
+            await asyncio.sleep(DNS_RETRY_DELAY)
         try:
-            return await asyncio.wait_for(
-                asyncio.open_connection(address, HTTPS_PORT), timeout=4
+            results = await loop.getaddrinfo(
+                destination, HTTPS_PORT, family=socket.AF_INET, type=socket.SOCK_STREAM
             )
-        except (OSError, TimeoutError):
+        except OSError:
             continue
+        for address in dict.fromkeys(result[4][0] for result in results):
+            if address in tried or not ipaddress.ip_address(address).is_global:
+                continue
+            tried.add(address)
+            try:
+                return await asyncio.wait_for(
+                    asyncio.open_connection(address, HTTPS_PORT), timeout=ADDRESS_CONNECT_TIMEOUT
+                )
+            except (OSError, TimeoutError):
+                continue
     raise OSError("EduCoder 不可达")
 
 
@@ -56,12 +73,13 @@ async def serve(bind, port, peer):
             except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError, ValueError):
                 client.write(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
                 return
-            if (method != b"CONNECT" or target != b"data.educoder.net:443"
+            destination = DESTINATIONS.get(target)
+            if (method != b"CONNECT" or destination is None
                     or protocol not in (b"HTTP/1.0", b"HTTP/1.1")):
                 client.write(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
                 return
             try:
-                incoming, upstream = await asyncio.wait_for(connect_educoder(), 10)
+                incoming, upstream = await asyncio.wait_for(connect_educoder(destination), CONNECT_TIMEOUT)
             except (OSError, TimeoutError):
                 client.write(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
                 return

@@ -1,4 +1,8 @@
-# 可选的原生只读设置。始终配合 credential-boundary.patch.yml 使用。
+# 已认证管理员可以管理插件；其余原生设置只读。
+- id: plugin-manager
+  disabled: false
+- id: ui-plugin-manager
+  disabled: false
 - id: config-editor
   disabled: false
 - id: settings

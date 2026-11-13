@@ -2,23 +2,24 @@
 services:
   dsh:
     environment:
-      DSH_EDUCODER_READONLY_SETTINGS: "1"
+      DSH_EDUCODER_PUBLIC_ADMIN: "1"
       DSH_EDUCODER_READONLY_TASKS: "1"
+      NODE_USE_ENV_PROXY: "0"
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
     command:
       - web
       - --patch
       - /opt/deepseek-harness/web.cordis.patch.yml
       - --patch
       - /opt/educoder-deployment/workspace.patch.yml
-      - --patch
-      - /opt/educoder-deployment/credential-boundary.patch.yml
-      - --patch
-      - /opt/educoder-deployment/public-settings.patch.yml
       - --no-open
       - --trusted-host
       - ${DSH_EDUCODER_PUBLIC_HOST:?请设置 Nginx 公网主机名或 IP}
-    volumes:
-      - ./public-settings.patch.yml:/opt/educoder-deployment/public-settings.patch.yml:ro
 networks:
   default:
     external: true

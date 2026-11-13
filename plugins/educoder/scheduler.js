@@ -5,6 +5,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 const VERSION = 1;
 const MAX_BATCH = 100;
+const MAX_COURSE_HOMEWORKS = 1000;
+const MAX_STAGE_CONTINUATIONS = 15;
 const MAX_EVENTS = 100;
 const MAX_RECONCILES = 5;
 const MAX_CONCURRENCY = 8;
@@ -17,12 +19,14 @@ const USER_ACTION = new Set(['paused', 'manual', 'failed']);
 const MANUAL_CODES = new Set([
   'auth_required', 'invalid_credentials', 'signature_error', 'invalid_scope', 'manual_required',
   'terminal_unavailable', 'verification_pending', 'uncertain', 'write_unverified', 'stale_scope',
-  'live_disabled',
+  'live_disabled', 'image_unavailable', 'image_model_unsupported',
+  'choice_closed',
 ]);
 const SAFE_CODES = new Set([
   ...MANUAL_CODES, 'unavailable', 'invalid_input', 'verification_failed', 'budget',
   'timeout', 'cancelled', 'agent_failed', 'busy', 'already_exists', 'not_found',
   'invalid_state', 'retry_limit', 'recovery_required', 'next_stage', 'stage_limit',
+  'resume_after_readback',
 ]);
 
 export class SchedulerError extends Error {
@@ -52,8 +56,8 @@ function numberBetween(value, min, max) {
   return value;
 }
 
-function requireBatch(batch) {
-  if (!Array.isArray(batch) || batch.length === 0 || batch.length > MAX_BATCH) fail('invalid_input');
+function requireBatch(batch, limit = MAX_BATCH) {
+  if (!Array.isArray(batch) || batch.length === 0 || batch.length > limit) fail('invalid_input');
   return batch;
 }
 
@@ -68,6 +72,10 @@ function normalizeTarget(target) {
     courseTitle: title(target?.courseTitle),
     homeworkTitle: title(target?.homeworkTitle),
   };
+}
+
+function targetKey({ accountId, courseId, homeworkId }) {
+  return JSON.stringify([accountId, courseId, homeworkId]);
 }
 
 function normalizeBinding(value, task) {
@@ -158,12 +166,12 @@ function logEvent(task, at) {
   if (task.events.length > MAX_EVENTS) task.events.shift();
 }
 
-function transition(task, status, at, code = null) {
+function transition(task, status, at, code = null, reconcile = false) {
   task.status = status;
   task.code = code;
   task.updatedAt = at;
   if (status === 'running') {
-    task.startedAt = at;
+    if (!reconcile || !task.startedAt) task.startedAt = at;
     task.finishedAt = null;
   } else if (status === 'queued') {
     task.finishedAt = null;
@@ -179,6 +187,16 @@ function clearVerification(task) {
   task.reconcileAttempts = 0;
 }
 
+function hasVerifiedSuccessor(task, status, code) {
+  return status === 'paused' && (code === 'stage_limit' || code === 'next_stage') &&
+    !task.mutation && !task.needsReconcile && Boolean(task.binding && task.nextTaskId);
+}
+
+function clearSessionResume(task) {
+  task.sessionResume = null;
+  task.sessionResumeTransfer = null;
+}
+
 function applyCheckpoint(task, changes) {
   if (Object.hasOwn(changes, 'binding')) {
     const binding = normalizeBinding(changes.binding, task);
@@ -188,8 +206,13 @@ function applyCheckpoint(task, changes) {
           task.binding.practiceId !== binding.practiceId ||
           task.nextTaskId !== binding.taskId ||
           (task.mutation && changes.mutation !== null)) fail('invalid_scope');
+      const transfer = task.sessionResumeTransfer;
+      const keepSession = !task.mutation && !task.needsReconcile &&
+        transfer?.fromTaskId === task.binding.taskId && transfer.toTaskId === binding.taskId;
       task.marker = null;
       task.nextTaskId = null;
+      if (!keepSession) clearSessionResume(task);
+      task.stageRetries = 0;
     }
     task.binding = binding;
   }
@@ -209,12 +232,28 @@ function applyCheckpoint(task, changes) {
     if (next === task.binding?.taskId) fail('invalid_scope');
     task.nextTaskId = next === null ? null : requireId(next);
   }
-  if (Object.hasOwn(changes, 'sessionId')) task.sessionId = requireId(changes.sessionId);
+  if (Object.hasOwn(changes, 'sessionId')) {
+    task.sessionId = requireId(changes.sessionId);
+    clearSessionResume(task);
+  }
+  if (Object.hasOwn(changes, 'sessionResumeSuccessor') && !Object.hasOwn(changes, 'sessionResume')) fail('invalid_scope');
+  if (Object.hasOwn(changes, 'sessionResume')) {
+    const { sessionId, key, scopeKey, lastRequestAt, requestCount } = changes.sessionResume ?? {};
+    if (!task.binding || task.mutation || task.needsReconcile || !task.sessionId || task.sessionId !== sessionId ||
+        typeof key !== 'string' || !/^[a-f0-9]{64}$/u.test(key) ||
+        (scopeKey !== undefined && (typeof scopeKey !== 'string' || !/^[a-f0-9]{64}$/u.test(scopeKey))) ||
+        !Number.isSafeInteger(lastRequestAt) || lastRequestAt <= 0 ||
+        !Number.isSafeInteger(requestCount) || requestCount <= 0) fail('invalid_scope');
+    const successor = changes.sessionResumeSuccessor;
+    if (successor !== undefined && (!scopeKey || successor !== task.nextTaskId || !successor)) fail('invalid_scope');
+    task.sessionResume = { sessionId, key, ...(scopeKey === undefined ? {} : { scopeKey }), lastRequestAt, requestCount };
+    task.sessionResumeTransfer = successor ? { fromTaskId: task.binding.taskId, toTaskId: successor } : null;
+  }
 }
 
 export function createScheduler({
   file, worker, reconcile, concurrency = 2, maxAttempts = 3,
-  timeoutMs = 15 * 60 * 1000, retryDelayMs = 1000,
+  timeoutMs = 15 * 60 * 1000, retryDelayMs = 1000, automaticRetries = false,
 } = {}) {
   if (typeof worker !== 'function' || typeof reconcile !== 'function') fail('invalid_input');
   numberBetween(concurrency, 1, MAX_CONCURRENCY);
@@ -289,16 +328,16 @@ export function createScheduler({
         return;
       }
       const mode = task.needsReconcile ? 'reconcile' : 'work';
+      const continuation = task.stageContinuation === true;
       change(draft => {
         const current = draft.tasks[task.id];
         draft.lastAccountId = current.accountId;
         current.retryAt = null;
         if (mode === 'reconcile') current.reconcileAttempts++;
-        else {
-          current.attempts++;
-          current.sessionId = null;
-        }
-        transition(current, 'running', time());
+        else if (!continuation) current.attempts++;
+        if (continuation) current.stageContinuation = false;
+        // 只读核验和自动续关都属于同一轮作业。
+        transition(current, 'running', time(), null, mode === 'reconcile' || continuation);
       });
       const entry = { controller: new AbortController(), taskId: task.id };
       active.set(task.accountId, entry);
@@ -324,8 +363,13 @@ export function createScheduler({
       if (Date.now() >= deadline) controller.abort(new SchedulerError('timeout'));
       if (!contextOpen || !changes || typeof changes !== 'object' || controller.signal.aborted ||
           current().status !== 'running') fail('cancelled');
-      // Reconciliation may only resolve a previous intent; it never records a new write.
-      if (mode === 'reconcile' && changes.mutation != null) fail('invalid_scope');
+      if (mode === 'reconcile') {
+        // 已读回的代码保存可以原子推进为一次待核验评测。
+        const previous = current().mutation;
+        const permitted = automaticRetries && previous?.phase === 'write' &&
+          changes.mutation?.phase === 'evaluate' && changes.mutation.marker === previous.marker;
+        if ((changes.mutation != null && !permitted) || Object.hasOwn(changes, 'sessionResume')) fail('invalid_scope');
+      }
       return change(draft => {
         const latest = draft.tasks[task.id];
         const oldSession = latest.sessionId;
@@ -375,6 +419,7 @@ export function createScheduler({
       // Validate all result fields before mutating the durable draft.
       const updated = structuredClone(task);
       if (mode === 'work' && result.mutation !== undefined && result.mutation !== null) fail('invalid_scope');
+      if (mode === 'reconcile' && Object.hasOwn(result, 'sessionResume')) fail('invalid_scope');
       if (mode === 'reconcile' && result.binding && task.binding &&
           !sameBinding(task.binding, normalizeBinding(result.binding, task))) fail('invalid_scope');
       if (mode === 'reconcile' && status === 'passed') {
@@ -399,12 +444,40 @@ export function createScheduler({
         task.verifiedAt = at;
       } else if (task.mutation && result.settled === true && status === 'failed' && code === 'verification_failed') {
         clearVerification(task);
+      } else if (task.mutation && automaticRetries && task.mutation.phase === 'evaluate' &&
+          task.reconcileAttempts < MAX_RECONCILES && ['verification_pending', 'unavailable', 'uncertain'].includes(code)) {
+        task.retryAt = new Date(Date.now() + retryDelayMs * 2 ** Math.max(0, task.reconcileAttempts - 1)).toISOString();
+        queue(task, draft, at, 'verification_pending');
+        return;
       } else if (task.mutation) {
         status = 'manual';
         code ??= 'uncertain';
       } else {
         task.needsReconcile = false;
       }
+    }
+    const canContinue = hasVerifiedSuccessor(task, status, code) &&
+      (task.stageContinuations ?? 0) < MAX_STAGE_CONTINUATIONS;
+    if (automaticRetries && mode === 'reconcile' && status === 'paused' && code === 'resume_after_readback' && !task.mutation &&
+        (task.stageRetries ?? 0) < maxAttempts - 1) {
+      task.stageRetries = (task.stageRetries ?? 0) + 1;
+      task.stageContinuation = true;
+      queue(task, draft, at, code);
+      return;
+    }
+    if (canContinue) {
+      task.stageContinuations = (task.stageContinuations ?? 0) + 1;
+      task.stageContinuation = true;
+      queue(task, draft, at);
+      return;
+    }
+    const stageRetries = task.stageRetries ?? 0;
+    if (automaticRetries && status === 'failed' && !task.mutation && stageRetries < maxAttempts - 1 &&
+        ['agent_failed', 'verification_failed', 'timeout', 'budget', 'unavailable', 'verification_pending'].includes(code)) {
+      task.stageRetries = stageRetries + 1;
+      task.retryAt = new Date(Date.now() + retryDelayMs * 2 ** stageRetries).toISOString();
+      queue(task, draft, at, code);
+      return;
     }
     transition(task, status, at, code);
   }
@@ -416,6 +489,7 @@ export function createScheduler({
       change(draft => {
         for (const task of all(draft).filter(item => item.status === 'running')) {
           task.needsReconcile = true;
+          clearSessionResume(task);
           task.retryAt = null;
           queue(task, draft, time(), 'recovery_required');
         }
@@ -426,34 +500,41 @@ export function createScheduler({
     throw error;
   }
 
-  function enqueueBatch(targets, { start = false } = {}) {
+  function enqueueTargets(targets, start, courseRun = false) {
     assertOpen();
     if (typeof start !== 'boolean') fail('invalid_input');
-    const normalized = requireBatch(targets).map(normalizeTarget);
-    const result = change(draft => normalized.map(target => {
-      if (accountBlocked(target.accountId)) fail('busy');
-      const existing = all(draft).find(task =>
-        task.accountId === target.accountId && task.courseId === target.courseId &&
-        task.homeworkId === target.homeworkId);
-      if (existing) {
-        if (existing.status === 'waiting' && start) queue(existing, draft, time());
-        return publicTask(existing);
-      }
-      const at = time();
-      const task = {
-        ...target, id: randomUUID(), status: 'waiting', code: null,
-        sessionId: null, createdAt: at, updatedAt: at, startedAt: null, finishedAt: null,
-        verifiedAt: null, attempts: 0, retryAt: null, queueOrder: null,
-        needsReconcile: false, reconcileAttempts: 0, binding: null,
-        marker: null, mutation: null, nextTaskId: null, events: [],
-      };
-      logEvent(task, at);
-      draft.tasks[task.id] = task;
-      if (start) queue(task, draft, at);
-      return publicTask(task);
-    }));
+    const normalized = requireBatch(targets, courseRun ? MAX_COURSE_HOMEWORKS : MAX_BATCH).map(normalizeTarget);
+    const result = change(draft => {
+      const tasksByTarget = new Map(all(draft).map(task => [targetKey(task), task]));
+      return normalized.map(target => {
+        if (accountBlocked(target.accountId)) fail('busy');
+        const key = targetKey(target);
+        const existing = tasksByTarget.get(key);
+        if (existing) {
+          if (existing.status === 'waiting' && start) queue(existing, draft, time());
+          return publicTask(existing);
+        }
+        const at = time();
+        const task = {
+          ...target, id: randomUUID(), status: 'waiting', code: null,
+          sessionId: null, sessionResume: null, createdAt: at, updatedAt: at, startedAt: null, finishedAt: null,
+          verifiedAt: null, attempts: 0, retryAt: null, queueOrder: null,
+          needsReconcile: false, reconcileAttempts: 0, binding: null,
+          marker: null, mutation: null, nextTaskId: null, events: [],
+        };
+        logEvent(task, at);
+        draft.tasks[task.id] = task;
+        tasksByTarget.set(key, task);
+        if (start) queue(task, draft, at);
+        return publicTask(task);
+      });
+    });
     if (start) schedule();
     return result;
+  }
+
+  function enqueueBatch(targets, { start = false } = {}) {
+    return enqueueTargets(targets, start);
   }
 
   function stopTask(task, action, at) {
@@ -462,6 +543,7 @@ export function createScheduler({
     if (action === 'pause' && !['queued', 'running'].includes(task.status)) fail('invalid_state');
     if (TERMINAL.has(task.status)) fail('invalid_state');
     if (task.mutation) task.needsReconcile = true;
+    if (task.stageContinuation) task.stageContinuation = false;
     task.retryAt = null;
     transition(task, action === 'pause' ? 'paused' : 'cancelled', at, action === 'cancel' ? 'cancelled' : null);
   }
@@ -476,6 +558,14 @@ export function createScheduler({
       if (action === 'start' || action === 'resume') {
         if (task.status === 'queued' || task.status === 'running') return publicTask(task);
         if (action === 'start' ? task.status !== 'waiting' : !USER_ACTION.has(task.status)) fail('invalid_state');
+        const resumablePause = automaticRetries && task.status === 'paused' && !task.mutation && !task.needsReconcile;
+        if (action === 'resume' && (resumablePause || hasVerifiedSuccessor(task, task.status, task.code))) {
+          task.stageContinuation = true;
+          task.stageContinuations = 0;
+          if (resumablePause) task.stageRetries = 0;
+          queue(task, draft, at);
+          return publicTask(task);
+        }
         if (task.needsReconcile && task.reconcileAttempts >= MAX_RECONCILES) fail('retry_limit');
         if (!task.needsReconcile && task.attempts >= maxAttempts) fail('retry_limit');
         const count = task.needsReconcile ? task.reconcileAttempts : task.attempts;
@@ -545,6 +635,7 @@ export function createScheduler({
   return {
     enqueue: (target, options) => enqueueBatch([target], options)[0],
     enqueueBatch,
+    enqueueCourse: targets => enqueueTargets(targets, true, true),
     list({ accountId } = {}) {
       if (accountId !== undefined) requireId(accountId);
       return all(state).filter(task => accountId === undefined || accountId === task.accountId).map(task => publicTask(task));

@@ -1,0 +1,32 @@
+[Unit]
+Description=OpenCode Go model relay for the isolated EduCoder DSH
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+DynamicUser=yes
+LoadCredential=opencode-go.key:/etc/dsh-secrets/opencode-go.key
+LoadCredential=educoder-go-relay.token:/etc/dsh-secrets/educoder-go-relay.token
+EnvironmentFile=/etc/dsh-secrets/educoder-go-relay.env
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/dsh-opencode-go-model.py
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+TasksMax=24
+
+[Install]
+WantedBy=multi-user.target

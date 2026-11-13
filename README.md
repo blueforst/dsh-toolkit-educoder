@@ -1,18 +1,33 @@
-# DSH Toolkit · Linux 服务器版
+# DSH Toolkit & EduCoder · Linux 服务器版
 
-本仓库是 [blueforst/dsh-toolkit](https://github.com/blueforst/dsh-toolkit) 的独立派生项目，保留上游提交历史、许可证和原 Toolkit 软件包。EduCoder 是独立安装的可选插件 `@forst/dsh-educoder`，提供账号隔离、课程和作业选择、持久队列以及在 DSH Session 中运行的受限评测工作流。安装与隔离验收见 [EduCoder 开发实例部署](deploy/educoder/README.md)。
+本仓库是 [blueforst/dsh-toolkit](https://github.com/blueforst/dsh-toolkit) 的独立派生项目，保留上游提交历史、许可证和原 Toolkit 软件包，并在此基础上新增 **`@forst/dsh-educoder`（当前 `0.1.14`）** 可选插件及隔离部署方案，提供头歌（EduCoder）多账号隔离、课程和作业选择、持久化任务队列以及在 DSH Session 中运行的受限评测工作流。详细功能见 [EduCoder 插件说明](plugins/educoder/README.md)，安装与隔离验收见 [EduCoder 开发与公网部署](deploy/educoder/README.md)。
 
-面向 Linux 服务器的 DSH 插件包：**服务器资源、OpenCode Go 月额度、Pi 会话费用**。另附 **Camoufox 指纹浏览器运行时**、**Linux 完整桌面与 Computer Use**及 **OpenCode Go 模型配置示例**。
+原 Toolkit 面向 Linux 服务器的 DSH 插件包：**服务器资源、OpenCode Go 月额度、Pi 会话费用**。另附 **Camoufox 指纹浏览器运行时**、**Linux 完整桌面与 Computer Use**及 **OpenCode Go 模型配置示例**。
 
 从 **0.2.0** 起，本机通用功能已分离到 [dsh-toolkit-local](https://github.com/blueforst/dsh-toolkit-local)。个人电脑只需要额度与费用增强时，安装本机版即可；浏览器和 CUA 使用 DSH 原生能力。
 
 本仓库保留服务器资源监控和部署配方，额度及费用从本机仓库的固定提交生成 `vendor` 快照，随服务器成品打包。两边只维护一份通用实现，服务器用户仍只需安装一个包。不要在同一 profile 同时安装服务器版和本机版。维护方式见 [拆分与版本复用](docs/拆分与版本复用.md)。
 
-源码与版本包：[blueforst/dsh-toolkit](https://github.com/blueforst/dsh-toolkit) · [下载发布包](https://github.com/blueforst/dsh-toolkit/releases)
+本仓库构建产物：[Actions](https://github.com/blueforst/dsh-toolkit-educoder/actions) · [PR #1](https://github.com/blueforst/dsh-toolkit-educoder/pull/1) · 上游基线：[blueforst/dsh-toolkit](https://github.com/blueforst/dsh-toolkit) · [上游 Releases](https://github.com/blueforst/dsh-toolkit/releases)
 
-[定制组件清单](docs/插件清单.md) · [验收记录](docs/验收记录.md)
+[定制组件清单](docs/插件清单.md) · [Toolkit 验收记录](docs/验收记录.md) · [EduCoder 验收记录](deploy/educoder/验收记录.md) · [EduCoder 作业准确率实测](deploy/educoder/作业准确率实测.md)
 
 Linux 桌面新增配方及真实截图坐标验收见 [桌面说明](integrations/linux-desktop/README.md) 与 [桌面验收记录](docs/Linux桌面验收.md)。
+
+## EduCoder 扩展（`@forst/dsh-educoder`）
+
+- **多账号隔离与控制面**：每个头歌账号独立保存会话、工作目录与 SQLite 调度状态；支持课程/作业浏览、单项分配及课程「一键通关」。
+- **工具最小化隔离**：作业执行会话通过 `tools.restrict` 与 `tools.guard` 严格隔离，**不挂载 DSH Standard 原生工具**，仅授权当前关卡所需的 `educoder_*` 专属工具。
+- **自动评测与读图链路**：支持代码、单选、多选、判断、填空及已配置执行器的 WebSSH 终端关卡；题干附带图片时优先通过原生图片附件传递前 4 张可用图片，评测结果不明或短窗口内尚未收敛时自动读回核验。
+- **无拦截只读浏览器检查**：启用 `DSH_EDUCODER_BROWSER_INSPECTION=1` 后，仅在暂不支持自动评测的题型或远端题图无法完整获取时向模型暴露只读 `educoder_browser`（无网络/WebSocket 请求拦截，也不包含页面操作工具）。
+- **隔离与转发配套**：提供 [凭据隔离边界](deploy/educoder/凭据隔离.md)、[OpenCode Go 模型转发](deploy/educoder/go-model-relay/README.md)、[OpenCode Go 额度转发](deploy/educoder/go-quota-relay/README.md) 与 [EduCoder 私网连接转发](deploy/educoder/educoder-connect/README.md)。
+
+安装与升级 `@forst/dsh-educoder`（独立于 `@forst/dsh-toolkit` 安装到同一 `web` profile）：
+
+```bash
+npm pack ./plugins/educoder --pack-destination dist
+dsh plugin --profile web add --ignore-scripts --save-exact "$PWD/dist/forst-dsh-educoder-0.1.14.tgz"
+```
 
 ## 包含什么
 
@@ -90,8 +105,11 @@ Go 接口当前返回整数百分比，不补小数位。没有密钥、请求�
 npm run build
 npm run check
 DSH_ENTRYPOINT="$(npm root -g)/@deepseek-ai/dsh/lib/bin.js" npm test
+node tests/educoder-soak.mjs --duration-ms 4000
+python3 -m unittest deploy/educoder/go-model-relay/test_relay.py
 python3 scripts/audit-release.py
 npm pack --pack-destination dist
+npm pack ./plugins/educoder --pack-destination dist
 ```
 
 统一客户端由两个独立模块的源码生成，不依赖额外打包器。GitHub Actions 会在固定 DSH 基线上执行构建与回归检查。包内无账户数据、会话日志或浏览器配置档。

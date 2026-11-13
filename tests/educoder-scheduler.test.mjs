@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createScheduler } from '../plugins/educoder/scheduler.js';
@@ -224,6 +225,70 @@ test('远端证据约束账号与关卡，已验证关卡后可推进下一关',
   assert.equal(held.verifiedAt, null);
 });
 
+test('单独和课程批量启动的作业均可自动续关，保留同一次尝试', { timeout: 8000 }, async t => {
+  const queue = setup(t).open({
+    maxAttempts: 1,
+    worker(task, { checkpoint }) {
+      if (!task.binding) {
+        const binding = bind(task);
+        checkpoint({ binding, marker: '1', nextTaskId: 'game2', sessionId: 'session-first' });
+        return { status: 'paused', code: 'stage_limit', binding, marker: '1', nextTaskId: 'game2' };
+      }
+      assert.equal(task.attempts, 1);
+      assert.equal(task.sessionId, 'session-first');
+      assert.equal(task.nextTaskId, 'game2');
+      const binding = bind(task, 'game2');
+      checkpoint({ binding, marker: '1', nextTaskId: null, sessionId: 'session-second' });
+      return { status: 'passed', binding, marker: '1', nextTaskId: null };
+    },
+    reconcile: verify,
+  });
+  const [courseTask] = queue.enqueueCourse([target('a')]);
+  const passed = await until(queue, courseTask.id, 'passed');
+  assert.equal(passed.attempts, 1);
+  assert.equal(passed.sessionId, 'session-second');
+  assert.equal(passed.startedAt, passed.events.find(event => event.status === 'running').at);
+
+  const manualTask = queue.enqueue(target('a', '43'), { start: true });
+  assert.equal((await until(queue, manualTask.id, 'passed')).attempts, 1);
+});
+
+test('旧版已暂停的续关任务可在重试次数用尽时继续', { timeout: 8000 }, async t => {
+  const { file, open } = setup(t);
+  let queue = open();
+  const task = queue.enqueue(target('a'));
+  await queue.close();
+  const startedAt = '2026-11-13T00:00:00.000Z';
+  const db = new DatabaseSync(file);
+  try {
+    const state = JSON.parse(db.prepare('SELECT data FROM scheduler_state WHERE id=1').get().data);
+    Object.assign(state.tasks[task.id], {
+      status: 'paused', code: 'next_stage', startedAt, attempts: 1,
+      binding: bind(task), marker: '1', nextTaskId: 'game2', sessionId: 'session-first',
+    });
+    db.prepare('UPDATE scheduler_state SET data=? WHERE id=1').run(JSON.stringify(state));
+  } finally {
+    db.close();
+  }
+
+  queue = open({
+    maxAttempts: 1,
+    worker(current, { checkpoint }) {
+      assert.equal(current.binding.taskId, 'game1');
+      assert.equal(current.nextTaskId, 'game2');
+      const binding = bind(current, 'game2');
+      checkpoint({ binding, nextTaskId: null, sessionId: 'session-second' });
+      return { status: 'passed', binding, marker: '1', nextTaskId: null };
+    },
+    reconcile: verify,
+  });
+  assert.equal(queue.resume(task.id).status, 'queued');
+  const completed = await until(queue, task.id, 'passed');
+  assert.equal(completed.attempts, 1);
+  assert.equal(completed.startedAt, startedAt);
+  assert.equal(completed.sessionId, 'session-second');
+});
+
 test('失败错误脱敏，显式重试受次数与退避限制', { timeout: 8000 }, async t => {
   const queue = setup(t).open({
     maxAttempts: 2,
@@ -241,4 +306,31 @@ test('失败错误脱敏，显式重试受次数与退避限制', { timeout: 800
   await until(queue, task.id, 'failed');
   assert.throws(() => queue.resume(task.id), { code: 'retry_limit' });
   assert.equal(queue.get(task.id).attempts, 2);
+});
+
+test('原生任务达到历史尝试上限后，手动暂停和继续仍沿用本轮', async t => {
+  let runs = 0;
+  const queue = setup(t).open({
+    maxAttempts: 1,
+    automaticRetries: true,
+    async worker(task, { signal }) {
+      assert.equal(task.attempts, 1);
+      runs++;
+      await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+      return { status: 'failed', code: 'cancelled' };
+    },
+  });
+  const task = queue.enqueue(target('a'), { start: true });
+  await waitFor(() => runs === 1);
+  const paused = queue.pause(task.id);
+  assert.equal(paused.status, 'paused');
+  assert.equal(paused.code, null);
+  await delay(15);
+  assert.equal(runs, 1);
+  assert.equal(queue.resume(task.id).status, 'queued');
+  await waitFor(() => runs === 2);
+  const running = queue.get(task.id);
+  assert.equal(running.attempts, 1);
+  assert.equal(running.startedAt, paused.startedAt);
+  assert.equal(queue.pause(task.id).status, 'paused');
 });

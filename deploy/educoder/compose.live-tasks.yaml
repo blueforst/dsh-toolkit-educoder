@@ -1,0 +1,10 @@
+# 最后一层叠加；供已认证、专用的真实账号实例启用作业执行。
+services:
+  dsh:
+    environment:
+      DSH_EDUCODER_READONLY_TASKS: "0"
+      DSH_EDUCODER_LIVE_TASKS: "1"
+      DSH_EDUCODER_WORKSPACE_DIR: /workspace/EduCoder
+      DSH_EDUCODER_BROWSER_INSPECTION: "1"
+      DSH_EDUCODER_PROVIDER: ${DSH_EDUCODER_TASK_PROVIDER:-deepseek-official}
+      DSH_EDUCODER_MODEL: ${DSH_EDUCODER_TASK_MODEL:-deepseek-flash}

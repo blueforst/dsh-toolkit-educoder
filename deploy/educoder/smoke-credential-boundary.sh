@@ -60,11 +60,11 @@ try {
     await response.body?.cancel();
   }
 
-  async function rpc(endpoint, args) {
+  async function rpc(endpoint, args, headers = authenticated) {
     stage = endpoint;
     return fetchChecked('/api/' + endpoint, {
       method: 'POST',
-      headers: { ...authenticated, 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({
         type: 'client-request', rpcId: crypto.randomUUID(), method: endpoint, payload: { args },
       }),
@@ -76,6 +76,18 @@ try {
   const catalog = await rpc('session/modelCatalog', {});
   status('model-catalog-api', catalog, 200);
   if (!(await catalog.json()).result?.ok) throw new Error('model catalog refused');
+
+  for (const endpoint of ['workspace/archiveSession', 'workspace/unarchiveSession']) {
+    const anonymous = await rpc(endpoint, {}, { origin });
+    status(endpoint + '-anonymous', anonymous, 401);
+    await anonymous.body?.cancel();
+    // 缺少会话 ID，原生控制器应拒绝参数，避免改变任何会话状态。
+    const response = await rpc(endpoint, {});
+    status(endpoint + '-authenticated', response, 200);
+    if ((await response.json()).result?.ok !== false) {
+      throw new Error('missing archive parameters were accepted');
+    }
+  }
 
   for (const endpoint of [
     'credentials/describe', 'settings/describe', 'workspaceFiles/read', 'terminal/list',

@@ -1,0 +1,10 @@
+# 最后叠加。由现有公网 HTTPS 入口代理 noVNC。
+services:
+  dsh:
+    pids_limit: 512
+    environment:
+      DSH_DESKTOP_ENABLED: "1"
+      DSH_BROWSER_USE_ENABLED: "1"
+      DSH_DESKTOP_PUBLIC_PORT: "443"
+    ports:
+      - "127.0.0.1:${DSH_EDUCODER_DESKTOP_PORT:-13082}:6080"

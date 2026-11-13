@@ -1,0 +1,5 @@
+# 在 compose.live-tasks.yaml 和模型配置后叠加。
+services:
+  dsh:
+    environment:
+      DSH_EDUCODER_TERMINAL_ENABLED: "1"

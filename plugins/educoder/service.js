@@ -19,9 +19,11 @@ export function privateDirectory(root) {
 }
 
 export function createService({
-  root, credentials, transport, runAgent, pollMs, pollAttempts, allowAccounts,
+  root, credentials, transport, runAgent, inspectBrowser, experience, extended = false, nativeTools = false, readSaveEvidence,
+  pollMs, pollAttempts, allowAccounts,
   allowTasks = true, mode = 'disabled',
 }) {
+  const extendedMode = Boolean(extended || nativeTools);
   privateDirectory(root);
   const allowed = typeof allowAccounts === 'function' ? allowAccounts : () => allowAccounts === true;
   function requireAccounts() {
@@ -35,6 +37,10 @@ export function createService({
   const workers = createWorkers({
     transport,
     runAgent,
+    inspectBrowser,
+    experience,
+    extended: extendedMode,
+    readSaveEvidence,
     pollMs,
     pollAttempts,
     accounts: {
@@ -46,6 +52,7 @@ export function createService({
   });
   const queue = createScheduler({
     file: join(root, 'queue.sqlite'),
+    automaticRetries: extendedMode,
     ...workers,
   });
   try {
@@ -68,6 +75,19 @@ export function createService({
     });
   }
 
+  function courseCatalog(accountId, courseId, options) {
+    return accounts.withSession(accountId, async session => {
+      const course = (await transport.courses(session)).find(item => item.id === courseId);
+      if (!course) fail('invalid_scope');
+      return { course, homeworks: await transport.homeworks(session, courseId, options) };
+    });
+  }
+
+  function requireReady(accountIds) {
+    const ready = new Set(accounts.list().filter(account => ['ready', 'unverified'].includes(account.status)).map(account => account.id));
+    if (accountIds.some(accountId => !ready.has(accountId))) fail('auth_required');
+  }
+
   async function allocate(targets, start) {
     if (!Array.isArray(targets) || !targets.length || targets.length > 100 || typeof start !== 'boolean') {
       fail('invalid_input');
@@ -80,20 +100,43 @@ export function createService({
       const { accountId, courseId, homeworkId: selected } = target;
       const id = JSON.stringify([accountId, courseId]);
       if (!catalogs.has(id)) {
-        catalogs.set(id, await accounts.withSession(accountId, async session => {
-          const course = (await transport.courses(session)).find(item => item.id === courseId);
-          if (!course) fail('invalid_scope');
-          return { course, homeworks: await transport.homeworks(session, courseId) };
-        }));
+        catalogs.set(id, await courseCatalog(accountId, courseId));
       }
       const { course, homeworks } = catalogs.get(id);
       const homework = homeworks.find(item => item.id === selected);
       if (!homework) fail('invalid_scope');
       validated.push({ accountId, courseId, homeworkId: selected, courseTitle: course.title, homeworkTitle: homework.title });
     }
-    const ready = new Set(accounts.list().filter(account => ['ready', 'unverified'].includes(account.status)).map(account => account.id));
-    if (validated.some(target => !ready.has(target.accountId))) fail('auth_required');
+    requireReady(validated.map(target => target.accountId));
     return queue.enqueueBatch(validated, { start });
+  }
+
+  async function startCourse(accountId, courseId) {
+    if (typeof courseId !== 'string' || !scopeId.test(courseId)) fail('invalid_input');
+    const { course, homeworks } = await courseCatalog(accountId, courseId, { requireComplete: true });
+    requireTasks();
+    requireReady([accountId]);
+
+    const existing = new Map(queue.list({ accountId }).filter(task => task.courseId === courseId)
+      .map(task => [task.homeworkId, task.status]));
+    const targets = [];
+    let skippedCompleted = 0;
+    let skippedExisting = 0;
+    for (const homework of homeworks) {
+      if (typeof homework.id !== 'string' || !homeworkId.test(homework.id)) fail('invalid_scope');
+      const status = existing.get(homework.id);
+      const complete = Number.isSafeInteger(homework.taskCount) && homework.taskCount > 0 &&
+        Number.isSafeInteger(homework.passedCount) && homework.passedCount >= homework.taskCount;
+      if (complete || status === 'passed') {
+        skippedCompleted++;
+      } else if (status && status !== 'waiting') {
+        skippedExisting++;
+      } else {
+        targets.push({ accountId, courseId, homeworkId: homework.id, courseTitle: course.title, homeworkTitle: homework.title });
+      }
+    }
+    const tasks = targets.length ? queue.enqueueCourse(targets) : [];
+    return { tasks, started: tasks.length, skippedCompleted, skippedExisting };
   }
 
   let closed = false;
@@ -125,6 +168,9 @@ export function createService({
       case 'allocate':
         requireTasks();
         return allocate(input.targets, input.start ?? false);
+      case 'startCourse':
+        requireTasks();
+        return startCourse(input.accountId, input.courseId);
       case 'control':
         if (!Object.hasOwn(controls, input.command)) fail('invalid_input');
         if (['start', 'resume'].includes(input.command)) requireTasks();

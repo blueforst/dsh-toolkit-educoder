@@ -1,11 +1,15 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createAgentRunner, installEduCoderToolBoundary } from './agent.js';
+import { createAgentRunner, createSaveEvidenceReader, installEduCoderToolBoundary } from './agent.js';
 import { createTransport } from './transport.js';
 import { createService } from './service.js';
+import { createExperience } from './experience.js';
+import { createTerminalRunner } from './terminal-runner.js';
+import { createBrowserInspector } from './browser.js';
+import { createEduCoderProxy } from './proxy.js';
 
 export const name = 'dsh-educoder';
-export const inject = ['webServer', 'connection', 'credentials', 'tools', 'agents', 'sessions', 'agentDefaultModel'];
+export const inject = ['webServer', 'connection', 'credentials', 'tools', 'agents', 'sessions', 'agentDefaultModel', 'llm', 'attachments', 'workspaceRegistry'];
 
 const errors = {
   invalid_input: [400, '请求参数无效。'],
@@ -23,6 +27,7 @@ const errors = {
   retry_limit: [409, '已达到重试上限。'],
   live_disabled: [403, '当前部署仅开放隔离测试。'],
   tasks_disabled: [403, '当前实例开放账号登录和课程查看，作业执行尚未启用。'],
+  course_limit: [409, '该课程作业超过一键通关的 1000 项上限。'],
 };
 
 function json(res, status, body, headers = {}) {
@@ -90,19 +95,41 @@ export function registerApi(ctx, service) {
 export function apply(ctx) {
   const baseUrl = process.env.DSH_EDUCODER_API_URL;
   const dedicated = process.env.DSH_EDUCODER_DEDICATED === '1';
-  const transport = createTransport({ baseUrl });
+  const publicAdmin = process.env.DSH_EDUCODER_PUBLIC_ADMIN === '1';
+  const scopedProxy = process.env.DSH_EDUCODER_HTTPS_PROXY;
+  const httpsProxy = scopedProxy || process.env.HTTPS_PROXY || process.env.https_proxy;
+  const terminalRunner = process.env.DSH_EDUCODER_TERMINAL_ENABLED === '1' ? createTerminalRunner({ proxyUrl: httpsProxy }) : undefined;
+  const inspectBrowser = process.env.DSH_EDUCODER_BROWSER_INSPECTION === '1' ? createBrowserInspector({
+    proxy: httpsProxy,
+  }) : undefined;
   const fixture = Boolean(baseUrl) && new URL(baseUrl).protocol === 'http:';
   const live = process.env.DSH_EDUCODER_LIVE_ACCOUNTS === '1';
+  const provider = process.env.DSH_EDUCODER_PROVIDER;
+  const model = process.env.DSH_EDUCODER_MODEL;
+  const allowTasks = process.env.DSH_EDUCODER_READONLY_TASKS !== '1' && (fixture || (
+    live && process.env.DSH_EDUCODER_LIVE_TASKS === '1' && Boolean(provider && model)
+  ));
   const root = resolve(process.env.DSH_EDUCODER_STATE_DIR || join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'educoder'));
   ctx.effect(() => {
-    const boundary = dedicated ? installEduCoderToolBoundary(ctx) : undefined;
+    const boundary = dedicated && !publicAdmin ? installEduCoderToolBoundary(ctx) : undefined;
+    let proxy;
     let service;
     let unregister;
     try {
+      proxy = createEduCoderProxy(scopedProxy);
+      const transport = createTransport({ baseUrl, terminalRunner, fetch: proxy.fetch });
+      const experience = dedicated && (live || process.env.DSH_EDUCODER_WORKSPACE_DIR) ? createExperience({
+        root: process.env.DSH_EDUCODER_WORKSPACE_DIR || join(root, 'workspace'), workspaceRegistry: ctx.workspaceRegistry,
+      }).catch(() => {
+        ctx.logger.warn('EduCoder 工作区初始化失败。');
+        return undefined;
+      }) : undefined;
       const runAgent = createAgentRunner(ctx, {
         workspaceRoot: join(root, 'workspaces'),
-        provider: process.env.DSH_EDUCODER_PROVIDER,
-        model: process.env.DSH_EDUCODER_MODEL,
+        provider,
+        model,
+        experience,
+        extended: publicAdmin,
         toolBoundary: boundary,
       });
       service = createService({
@@ -110,22 +137,29 @@ export function apply(ctx) {
         credentials: ctx.credentials,
         transport,
         runAgent,
+        experience,
+        inspectBrowser,
+        extended: publicAdmin,
+        readSaveEvidence: createSaveEvidenceReader(ctx),
         allowAccounts: () => dedicated && (fixture || (
-          live && ctx.get('educoderCredentialBoundary', false)?.() === true
+          live && (publicAdmin || ctx.get('educoderCredentialBoundary', false)?.() === true)
         )),
-        allowTasks: process.env.DSH_EDUCODER_READONLY_TASKS !== '1',
+        allowTasks,
         mode: fixture ? 'fixture' : live ? 'live' : 'disabled',
       });
       unregister = registerApi(ctx, service);
     } catch (error) {
       boundary?.dispose();
       void service?.close();
+      void proxy?.close();
       throw error;
     }
     return async () => {
       unregister();
-      await service.close();
-      boundary?.dispose();
+      try { await service.close(); } finally {
+        boundary?.dispose();
+        await proxy.close();
+      }
     };
   }, 'EduCoder 控制面与调度器');
 }

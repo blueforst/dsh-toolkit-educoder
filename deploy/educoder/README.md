@@ -74,6 +74,7 @@ sudo docker compose up -d --wait --wait-timeout 60
 mkdir -p deploy/educoder/fixtures
 cp deploy/educoder/educoder-fixture-model.patch.yml \
   tests/fixtures/educoder-integration.mjs tests/educoder-web-smoke.mjs tests/educoder-client.test.mjs \
+  tests/educoder-vision-smoke.mjs \
   deploy/educoder/fixtures/
 ```
 
@@ -84,15 +85,16 @@ cd /opt/dsh-educoder-dev
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml config --quiet
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml up -d --wait --wait-timeout 60
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml exec -T dsh \
-  dsh plugin --profile web add --ignore-scripts --save-exact /opt/educoder-packages/forst-dsh-educoder-0.1.1.tgz
+  dsh plugin --profile web add --ignore-scripts --save-exact /opt/educoder-packages/forst-dsh-educoder-0.1.14.tgz
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml restart dsh
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml up -d --wait --wait-timeout 60
 sudo bash smoke-credential-boundary.sh
 sudo bash smoke-educoder-fixture.sh
 sudo bash smoke-educoder-fixture.sh --browser
+sudo bash smoke-educoder-fixture.sh --vision
 ```
 
-API 验收检查登录和 Origin 防护、宿主文件和上传入口阻断、手动创建会话和发送提示的拒绝、账号隔离、跨账号分配拒绝、并行执行、远端读回、重复分配及会话过期恢复。浏览器验收通过 DSH 的原生面板操作两个模拟账号，并打开对应的 DSH 会话。每次业务验收使用新的模拟账号组，并在终端输出脱敏的 JSON 结果。
+API 验收检查登录和 Origin 防护、宿主文件和上传入口阻断、手动创建会话和发送提示的拒绝、账号隔离、跨账号分配拒绝、并行执行、远端读回、重复分配及会话过期恢复。浏览器验收通过 DSH 的原生面板操作两个模拟账号，并打开对应的 DSH 会话。读图验收检查两个账号各自的题图是否逐字节送达模型替身，以及图丢失时是否停止评测。每次业务验收使用新的模拟账号组，并在终端输出脱敏的 JSON 结果。
 
 ### 公网模拟实例
 
@@ -104,9 +106,30 @@ API 验收检查登录和 Origin 防护、宿主文件和上传入口阻断、�
 
 真实账号默认关闭。叠加 `compose.credentials.yaml` 会启动独立的 `dsh-educoder-live` 项目，使用单独的凭据和工作区卷，以及宿主回环端口 `13081`。启用前需要在 `DSH_EDUCODER_LIVE_ENV` 指向的受保护文件中设置 `DSH_EDUCODER_LIVE_ACCOUNTS=1`，提供已授权的 `EDUCODER_SIGNING_ACCESS_KEY` 和 `EDUCODER_SIGNING_SECRET_KEY`。同一个环境文件也可引用已配置的 DSH 模型路由。专用实例启动后需要通过运行时的凭据隔离检查。用户通过 SSH 隧道或带认证的 HTTPS 打开 DSH Web 面板后输入账号凭据。权限边界细节见 [凭据隔离](凭据隔离.md)。
 
-通过已启用 HTTPS 和账号验证的 Nginx 提供绑定入口时，再叠加 `compose.public-live.yaml`。设置 `DSH_EDUCODER_PUBLIC_HOST` 为公网入口的主机名或 IP，设置 `DSH_EDUCODER_PUBLIC_NETWORK` 为已创建的 Docker 私有网络。该组合开放账号绑定和课程作业查看，原生设置只读。Nginx 指向新实例的宿主回环端口，签发 DSH 浏览器 Cookie 的同步服务也需切换到新实例。真实实例使用独立卷，不能挂载模拟模型配置。
+通过已启用 HTTPS 和账号验证的 Nginx 提供入口时，再叠加 `compose.public-live.yaml`。设置 `DSH_EDUCODER_PUBLIC_HOST` 为公网入口的主机名或 IP，设置 `DSH_EDUCODER_PUBLIC_NETWORK` 为已创建的 Docker 私有网络。已登录的用户拥有 DSH 原生管理员功能，可使用普通会话、工作区、设置和插件管理。公网组合使用 `DSH_EDUCODER_PUBLIC_ADMIN=1`，并省略隔离验收补丁。EduCoder 面板使用同一套登录验证。Nginx 指向新实例的宿主回环端口，签发 DSH 浏览器 Cookie 的同步服务也需切换到新实例。真实实例使用独立卷。
 
-若宿主无法直连 EduCoder，可按 [EduCoder 出站转发](educoder-connect/README.md) 配置只允许 EduCoder HTTPS 的私网转发。Go 额度可继续使用同一私有网桥上的宿主额度服务。切换前先在回环端口验证新实例。回滚时恢复旧反向代理配置和 Cookie 同步服务，保留新实例的数据卷。
+若宿主无法直连 EduCoder，可按 [EduCoder 出站转发](educoder-connect/README.md) 配置私网转发。公网实例在受保护的环境文件中用 `DSH_EDUCODER_HTTPS_PROXY` 为头歌指定代理，DSH 普通模型和工具使用正常网络。Go 额度可继续使用同一私有网桥上的宿主额度服务。切换前先在回环端口验证新实例。回滚时恢复旧反向代理配置和 Cookie 同步服务，保留新实例的数据卷。
+
+### 启用真实作业执行
+
+安装 EduCoder `0.1.14`（自 `0.1.9` 起支持真实作业执行），再将 `compose.live-tasks.yaml` 放在现有 Compose 文件之后。默认固定使用 `deepseek-official/deepseek-flash`。使用此路由时，专用实例必须能访问 DeepSeek API，且由受保护的环境文件注入 `DEEPSEEK_API_KEY`。作业会话通过工具隔离仅按绑定的账号和关卡授权 `educoder_*` 专属工具，不加载 DSH Standard 原生工具。
+
+若容器只能访问宿主网桥，可安装 [OpenCode Go 模型转发](go-model-relay/README.md)。然后将 `compose.public-go-tasks.yaml` 放在最末。该文件从 `/etc/dsh-secrets/educoder-go-model.env` 读入 `DSH_GO_MODEL_TOKEN`；可用 `DSH_EDUCODER_GO_TOKEN_ENV` 指定其他受保护的环境文件。使用与原实例相同的 Compose 项目名和环境参数。若该项目由 systemd 管理，把同一文件顺序写入启动配置。
+
+```bash
+sudo docker compose -f compose.yaml -f compose.credentials.yaml -f compose.public-live.yaml \
+  -f compose.live-tasks.yaml -f compose.public-go-tasks.yaml config --quiet
+```
+
+重建后，在 EduCoder 面板选择账号和课程，点击「一键通关」即可启动该课程的未完成作业，也可以单独启动某项作业。未打开的实训在执行时进入。DSH 先保存代码，再发起评测。通过状态以头歌读回为准，评测结果不明或短暂未收敛时优先只读核验。独立 VNC 图形题和没有配置执行器的终端题保留人工处理。
+
+作业会话集中显示在原生「EduCoder」工作区。目录由 `DSH_EDUCODER_WORKSPACE_DIR` 指定，真实执行配置使用 `/workspace/EduCoder`。《解题经验》随工作区卷保存，每次解题可参考已有笔记，评测通过后可补充通用做法。
+
+启用 `DSH_EDUCODER_BROWSER_INSPECTION=1` 时，插件仅在暂不支持自动评测的题型或远端题图无法完整获取时，向模型暴露无网络请求拦截的只读 `educoder_browser` 检查工具（不提供浏览器页面操作工具）；镜像需要内置 Chromium 与 Playwright，并能通过现有出站代理访问头歌网页和静态资源。图形界面的点击和答题仍需人工操作。
+
+代码题中的参考图通过 DSH 原生图片附件送给模型（超过 4 张参考图时仍附带前 4 张可用图片，并允许按需借助只读浏览器检查补充确认）。使用能接收图片的模型路由，并允许容器读取头歌附件及固定的 `prod-attachments.oss-accelerate.aliyuncs.com` 附件域名。容器可直连附件域名时，把它加入 `NO_PROXY`；否则按 [私网连接转发](educoder-connect/README.md) 更新代理。若题图下载失败或模型不支持图片，任务停在人工处理，避免仅凭文字提交。
+
+公网侧边栏的「浏览器桌面」使用当前镜像内置的 Chromium 和 Openbox。启用时，把 `compose.public-desktop.yaml` 加到现有 Compose 参数最后，并在现有 HTTPS `server` 中加入 [noVNC 反代配置](public-desktop.nginx.conf)。静态资源和 WebSocket 共用公网登录。原生 Browser Use 连接同一个 Chromium。公网反代的上传大小可按 [原生附件配置](public-uploads.nginx.conf) 设置。自定义回环端口时，同步更新 Nginx 的目标端口。
 
 ## 重启、备份和回滚
 

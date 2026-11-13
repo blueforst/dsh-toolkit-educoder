@@ -8,7 +8,7 @@ const disabledDirectoryPicker = Object.freeze({
 });
 
 const forbidden = [
-  'terminalController', 'workspaceFiles', 'pluginManager',
+  'terminalController', 'workspaceFiles',
   'accountController',
   'dynamicCordisRunner', 'cordisInspect', 'workspaceChanges',
   'cuaAccess', 'ptcRuntime',
@@ -31,7 +31,6 @@ const deniedRoutes = [
     'create', 'fork', 'prompt', 'updateQueue', 'selectModel', 'initializeDefaultModel',
     'cancel', 'rename', 'openWorkspacePath', 'workspacePathApplications',
   ].map(action => '/api/session/' + action),
-  ...['archiveSession', 'unarchiveSession'].map(action => '/api/workspace/' + action),
 ];
 
 export function apply(ctx) {
@@ -56,6 +55,7 @@ export function apply(ctx) {
     const readonlySettings = process.env.DSH_EDUCODER_READONLY_SETTINGS === '1';
     return ctx.get('directoryPicker')?.capability()?.kind === 'unavailable' &&
       forbidden.every(key => ctx.get(key, false) === undefined) &&
+      (ctx.get('pluginManager', false) === undefined || readonlySettings) &&
       settingsServices.every(key => (ctx.get(key, false) !== undefined) === readonlySettings);
   });
 }
