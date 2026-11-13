@@ -43,6 +43,10 @@ try {
     ['file-dot-segment', '/api/%2e/file?path=/etc/passwd', 'GET', authenticated, 403],
     ['cross-origin-file', '/api/file?path=/etc/passwd', 'GET', { cookie, origin: 'https://outside.invalid' }, 403],
     ['streaming-upload', '/api/session/uploadFileBinary', 'POST', authenticated, 403],
+    ['encoded-upload', '/api/fileUploads/upload', 'POST', authenticated, 403],
+    ['directory-list', '/api/directoryPicker/list', 'POST', authenticated, 403],
+    ['directory-choose', '/api/directoryPicker/pick', 'POST', authenticated, 403],
+    ['directory-create', '/api/directoryPicker/createDirectory', 'POST', authenticated, 403],
     ['native-path-open', '/api/session/openWorkspacePath', 'POST', authenticated, 403],
     ['manual-session', '/api/session/create', 'POST', authenticated, 403],
     ['manual-prompt', '/api/session/prompt', 'POST', authenticated, 403],
@@ -72,8 +76,7 @@ try {
   if (!(await catalog.json()).result?.ok) throw new Error('model catalog refused');
 
   for (const endpoint of [
-    'credentials/describe', 'settings/describe', 'fileUploads/upload',
-    'workspaceFiles/read', 'terminal/list', 'directoryPicker/list',
+    'credentials/describe', 'settings/describe', 'workspaceFiles/read', 'terminal/list',
   ]) {
     const response = await rpc(endpoint, {});
     const code = response.status === 200 ? (await response.json()).result?.error?.code : undefined;

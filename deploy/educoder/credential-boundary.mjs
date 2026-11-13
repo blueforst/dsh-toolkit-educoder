@@ -2,26 +2,23 @@
 export const name = 'educoder-credential-boundary';
 export const inject = ['webServer', 'connection'];
 
-const disabledFileUploads = Object.freeze({
-  registerAgentResolver() { return () => {}; },
-  resolve() { return undefined; },
-  bindPrompt(_agent, receiptIds) {
-    if (receiptIds.length) throw new Error('此实例未启用文件上传。');
-    return { commit() {}, [Symbol.dispose]() {} };
-  },
-  retirePrompt() {},
+const unavailableDirectory = Object.freeze({ kind: 'unavailable' });
+const disabledDirectoryPicker = Object.freeze({
+  capability() { return unavailableDirectory; },
 });
 
 const forbidden = [
   'terminalController', 'workspaceFiles', 'pluginManager',
   'configEditor', 'settingsController', 'credentialsController', 'accountController',
-  'dynamicCordisRunner', 'cordisInspect', 'directoryPickerController', 'workspaceChanges',
+  'dynamicCordisRunner', 'cordisInspect', 'workspaceChanges',
   'cuaAccess', 'ptcRuntime',
 ];
 
 const deniedRoutes = [
   '/api/file',
   '/api/session/uploadFileBinary',
+  '/api/fileUploads/upload',
+  ...['pick', 'list', 'createDirectory'].map(action => '/api/directoryPicker/' + action),
   ...[
     'create', 'fork', 'prompt', 'updateQueue', 'selectModel', 'initializeDefaultModel',
     'cancel', 'rename', 'openWorkspacePath', 'workspacePathApplications',
@@ -44,14 +41,11 @@ export function apply(ctx) {
       },
     }));
   }
-  // Session 控制器依赖 fileUploads 来处理提示中的可选附件回执。
-  // 此提供器只允许空回执的文本提示，不提供上传方法或 Remote 路由。
-  ctx.provide('fileUploads', disabledFileUploads);
+  // DSH 的工作区导航依赖目录选择的 Remote 命名空间。空后端不访问文件系统。
+  ctx.provide('directoryPicker', disabledDirectoryPicker);
   // 运行时每次使用前重新核对。独立部署的 Host 本身仍是可信管理员边界。
   ctx.provide('educoderCredentialBoundary', () => {
-    const uploads = ctx.get('fileUploads');
-    return uploads !== undefined && typeof uploads.upload !== 'function' &&
-      typeof uploads.uploadStream !== 'function' &&
+    return ctx.get('directoryPicker')?.capability()?.kind === 'unavailable' &&
       forbidden.every(key => ctx.get(key, false) === undefined);
   });
 }
