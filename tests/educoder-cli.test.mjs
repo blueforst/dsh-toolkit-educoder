@@ -549,3 +549,276 @@ test('submit-choices 兼容常见 JSON 格式并输出清晰校验详情（不�
     },
   );
 });
+
+function startMultiAccountMockEduCoder(t) {
+  const users = new Map([
+    ['zzud-a', {
+      userId: 7001,
+      cookie: 'cookie-secret-a',
+      courseId: 'course-a',
+      courseName: '课程 A',
+      homeworkId: 101,
+      homeworkName: '作业 A',
+      practiceId: 'practice-a',
+      shixunId: 'shixun-a',
+      taskId: 'task-a1',
+      challengeId: 501,
+      gameId: 601,
+      code: '# account A code\n',
+      state: 'pending',
+    }],
+    ['zzud-b', {
+      userId: 8002,
+      cookie: 'cookie-secret-b',
+      courseId: 'course-b',
+      courseName: '课程 B',
+      homeworkId: 909,
+      homeworkName: '作业 B',
+      practiceId: 'practice-b',
+      shixunId: 'shixun-b',
+      taskId: 'task-b1',
+      secondTaskId: 'task-b2',
+      challengeId: 502,
+      gameId: 602,
+      code: '# starter B\n',
+      state: 'pending',
+      builds: 0,
+    }],
+  ]);
+  const calls = [];
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    const zzud = url.searchParams.get('zzud');
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const bodyText = Buffer.concat(chunks).toString('utf8');
+    const body = bodyText ? JSON.parse(bodyText) : undefined;
+    const u = users.get(zzud);
+    calls.push({ method: req.method, pathname: url.pathname, zzud });
+
+    if (!u || req.headers['pc-authorization'] !== u.cookie) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: -1, message: 'unauthorized' }));
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/courses.json') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 0,
+        user_id: u.userId,
+        courses: [{ identifier: u.courseId, name: u.courseName }],
+      }));
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === `/api/courses/${u.courseId}/homework_commons.json`) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 0,
+        user_id: u.userId,
+        homeworks: [{
+          homework_id: u.homeworkId,
+          name: u.homeworkName,
+          challenge_count: 2,
+          finished_challenge_count: 1,
+          myshixun_identifier: u.practiceId,
+          shixun_identifier: u.shixunId,
+        }],
+      }));
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === `/api/myshixuns/${u.practiceId}.json`) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 0, user_id: u.userId, game_identifier: u.taskId }));
+      return;
+    }
+    if (req.method === 'GET' && (url.pathname === `/api/tasks/${u.taskId}.json` || url.pathname === `/api/tasks/${u.secondTaskId}.json`)) {
+      const requestedTaskId = url.pathname.endsWith(`${u.secondTaskId}.json`) ? u.secondTaskId : u.taskId;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 0,
+        sec_key: `sec-${u.userId}`,
+        homework_common_id: u.homeworkId,
+        course_identifier: u.courseId,
+        myshixun: { identifier: u.practiceId, commit_id: `commit-${u.builds || 0}` },
+        user: { user_id: u.userId },
+        game: {
+          id: requestedTaskId === u.secondTaskId ? u.gameId + 1 : u.gameId,
+          identifier: requestedTaskId,
+          user_id: u.userId,
+          challenge_id: u.challengeId,
+          status: u.state === 'passed' ? 2 : 0,
+        },
+        challenge: {
+          id: u.challengeId,
+          name: `关卡 ${requestedTaskId}`,
+          task_pass: `请完成 ${requestedTaskId}（不要泄露 ${u.cookie}）`,
+          path: 'main.py',
+        },
+        shixun_environments: [{ tab_type: 1, shixun_environment_id: 9 }],
+        evaluate_count: u.builds || 0,
+        building: false,
+      }));
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === `/api/tasks/${u.taskId}/rep_content.json`) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 0,
+        user_id: u.userId,
+        content: { content: Buffer.from(u.code, 'utf8').toString('base64') },
+      }));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === `/api/myshixuns/${u.practiceId}/update_file.json`) {
+      u.code = body.content;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 0,
+        user_id: u.userId,
+        sec_key: `sec-${u.userId}`,
+        content: { commitID: `commit-saved-${u.builds || 0}` },
+      }));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === `/api/tasks/${u.taskId}/game_build.json`) {
+      u.builds = (u.builds || 0) + 1;
+      u.state = 'passed';
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 0, user_id: u.userId, res: { code: 0 } }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  return new Promise(resolveServer => {
+    server.listen(0, '127.0.0.1', () => {
+      t.after(() => server.close());
+      resolveServer({
+        apiUrl: `http://127.0.0.1:${server.address().port}/api`,
+        getUser: key => users.get(key),
+        calls,
+      });
+    });
+  });
+}
+
+test('CLI 支持多账号列举、courses/homeworks 查询、--account 切换并清理跨账号绑定与全账号凭据脱敏', async t => {
+  const sharedRoot = await mkdtemp(join(tmpdir(), 'dsh-cli-multi-'));
+  t.after(() => rm(sharedRoot, { recursive: true, force: true }));
+  const cliInfo = await syncCliWorkspace(sharedRoot);
+  const mock = await startMultiAccountMockEduCoder(t);
+
+  const accountsSnapshot = [
+    {
+      id: '11111111-1111-1111-1111-111111111111',
+      remoteUserId: '7001',
+      label: 'al***01',
+      status: 'ready',
+      session: { remoteUserId: '7001', session: 'cookie-secret-a', autologin: 'auto-secret-a', zzud: 'zzud-a' },
+    },
+    {
+      id: '22222222-2222-2222-2222-222222222222',
+      remoteUserId: '8002',
+      label: 'bo***02',
+      status: 'ready',
+      session: { remoteUserId: '8002', session: 'cookie-secret-b', autologin: 'auto-secret-b', zzud: 'zzud-b' },
+    },
+    {
+      id: '33333333-3333-3333-3333-333333333333',
+      remoteUserId: '9003',
+      label: 'ex***03',
+      status: 'auth_required',
+    },
+  ];
+
+  const workspaceEnv = {
+    DSH_EDUCODER_CLI: cliInfo.entrypoint,
+    DSH_EDUCODER_CLI_ROOT: cliInfo.cliRoot,
+    DSH_EDUCODER_API_URL: mock.apiUrl,
+    DSH_EDUCODER_ACCOUNTS: JSON.stringify(accountsSnapshot),
+    DSH_EDUCODER_READONLY: '0',
+  };
+
+  // 1. accounts 不泄漏任何 cookie，并能正确列出全部账号与 doctor accountCount
+  const accountsOut = (await runCliProcess(cliInfo.entrypoint, ['accounts', '--json'], workspaceEnv)).stdout;
+  assert.doesNotMatch(accountsOut, /cookie-secret|auto-secret|zzud-a|zzud-b/);
+  const parsedAccounts = JSON.parse(accountsOut);
+  assert.equal(parsedAccounts.length, 3);
+  assert.equal(parsedAccounts[0].hasSession, true);
+  assert.equal(parsedAccounts[2].hasSession, false);
+
+  const doctorJson = JSON.parse((await runCliProcess(cliInfo.entrypoint, ['doctor', '--json'], workspaceEnv)).stdout);
+  assert.equal(doctorJson.accountCount, 3);
+
+  // 2. 多账号下省略 --account 应明确报错提示（exit code 2）
+  await assert.rejects(
+    runCliProcess(cliInfo.entrypoint, ['courses'], workspaceEnv),
+    err => err.code === 2 && /多个可用账号/.test(err.stderr),
+  );
+
+  // 3. 通过 label / remoteUserId 选择账号查看课程与作业
+  const coursesB = JSON.parse((await runCliProcess(cliInfo.entrypoint, [
+    'courses', '--account', 'bo***02', '--json',
+  ], workspaceEnv)).stdout);
+  assert.deepEqual(coursesB, [{ id: 'course-b', title: '课程 B' }]);
+
+  const homeworksB = JSON.parse((await runCliProcess(cliInfo.entrypoint, [
+    'homeworks', '--account', '8002', '--course-id', 'course-b', '--json',
+  ], workspaceEnv)).stdout);
+  assert.deepEqual(homeworksB, [{ id: '909', title: '作业 B', taskCount: 2, passedCount: 1 }]);
+
+  // 4. 在单任务隔离环境下切账号，也能清除旧 binding 并完成 inspect/read/save/evaluate 且输出全账号脱敏
+  const workerEnv = {
+    ...workspaceEnv,
+    DSH_EDUCODER_SESSION: JSON.stringify(accountsSnapshot[0].session),
+    DSH_EDUCODER_TARGET: JSON.stringify({
+      courseId: 'course-a',
+      homeworkId: '101',
+      taskId: 'task-a1',
+      binding: {
+        courseId: 'course-a',
+        homeworkId: '101',
+        taskId: 'task-a1',
+        practiceId: 'practice-a',
+        remoteUserId: '7001',
+        gameId: '601',
+        challengeId: '501',
+      },
+    }),
+  };
+
+  // 不传 --task-id 也能直接 inspect / 指定 --task-id 也能直接 inspect 且题面对 cookie 脱敏
+  const inspectedB = JSON.parse((await runCliProcess(cliInfo.entrypoint, [
+    'inspect', '--account', '8002', '--course-id', 'course-b', '--homework-id', '909', '--no-open', '--json',
+  ], workerEnv)).stdout);
+  assert.equal(inspectedB.binding.taskId, 'task-b1');
+  assert.doesNotMatch(inspectedB.instructions, /cookie-secret-b/);
+
+  const inspectedB2 = JSON.parse((await runCliProcess(cliInfo.entrypoint, [
+    'inspect', '--account', '8002', '--course-id', 'course-b', '--homework-id', '909', '--task-id', 'task-b2', '--json',
+  ], workerEnv)).stdout);
+  assert.equal(inspectedB2.binding.taskId, 'task-b2');
+
+  const draftFile = join(sharedRoot, 'draft-b.py');
+  await writeFile(draftFile, 'print("solved B")\n', 'utf8');
+  await runCliProcess(cliInfo.entrypoint, [
+    'save-file', '--account', '8002', '--course-id', 'course-b', '--homework-id', '909', '--from', draftFile,
+  ], workerEnv);
+  const evalOut = JSON.parse((await runCliProcess(cliInfo.entrypoint, [
+    'evaluate', '--account', '8002', '--course-id', 'course-b', '--homework-id', '909', '--json',
+  ], workerEnv)).stdout);
+  assert.equal(evalOut.state, 'passed');
+  assert.equal(mock.getUser('zzud-b').code, 'print("solved B")\n');
+  assert.equal(mock.getUser('zzud-a').code, '# account A code\n');
+
+  // 5. 仅 1 个可用账号（另一个是 auth_required）时省略 --account 应自动选中
+  const singleReadyEnv = {
+    ...workspaceEnv,
+    DSH_EDUCODER_ACCOUNTS: JSON.stringify([accountsSnapshot[1], accountsSnapshot[2]]),
+  };
+  const autoCourses = JSON.parse((await runCliProcess(cliInfo.entrypoint, [
+    'courses', '--json',
+  ], singleReadyEnv)).stdout);
+  assert.deepEqual(autoCourses, [{ id: 'course-b', title: '课程 B' }]);
+});

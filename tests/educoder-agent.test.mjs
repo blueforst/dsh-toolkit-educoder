@@ -12,7 +12,9 @@ import {
   NATIVE_CODING_TOOLS,
   createAgentRunner,
   createSaveEvidenceReader,
+  registerWorkspaceShellEnv,
 } from '../plugins/educoder/agent.js';
+import { createExperience } from '../plugins/educoder/experience.js';
 import { apply as applyEduCoderPlugin } from '../plugins/educoder/index.js';
 import { writeCliState } from '../plugins/educoder/cli/lib/state.mjs';
 
@@ -770,7 +772,7 @@ async function resolveTestDshEntrypoint() {
   return undefined;
 }
 
-async function bootRealCordisHost(t, { withSessionController = false, onWebSearch } = {}) {
+async function bootRealCordisHost(t, { withSessionController = false, withSkills = false, onWebSearch } = {}) {
   const entrypoint = await resolveTestDshEntrypoint();
   if (!entrypoint) return undefined;
   const previousEntrypoint = process.env.DSH_ENTRYPOINT;
@@ -881,6 +883,26 @@ async function bootRealCordisHost(t, { withSessionController = false, onWebSearc
     );
   }
 
+  if (withSkills) {
+    const [skillMod, skillFsMod, toolBashMod] = await Promise.all([
+      importHost('@deepseek-ai/dsh-skill'),
+      importHost('@deepseek-ai/dsh-skill-filesystem'),
+      importHost('@deepseek-ai/dsh-tool-bash'),
+    ]);
+    const bundledSkillDir = join(root, 'bundled-skills');
+    await mkdir(bundledSkillDir, { recursive: true });
+    forks.push(
+      ctx.plugin(unwrap(skillMod)),
+      ctx.plugin(unwrap(skillFsMod), {
+        watch: false,
+        dshHome: join(root, 'dsh-home'),
+        agentsHome: join(root, 'agents-home'),
+        bundledSkillDir,
+      }),
+      ctx.plugin(unwrap(toolBashMod)),
+    );
+  }
+
   await Promise.all(forks.map(fork => fork.await?.()));
 
   // 注册一个全局无关工具，验证 mountNativeCodingTools + restrict + guard 会将其彻底屏蔽
@@ -933,6 +955,7 @@ async function bootRealCordisHost(t, { withSessionController = false, onWebSearc
   return {
     root,
     ctx,
+    importHost,
     workspace,
     warnings,
     capturedRequests,
@@ -1189,3 +1212,177 @@ test('挂载 SessionController 时走正常常驻会话流程：结束后不注�
   const userTranscript = JSON.stringify(capturedRequests.at(-1).messages ?? []);
   assert.ok(userTranscript.includes('CLEAN_ENV=yes'), 'EduCoder shellEnv secrets must be purged after turn');
 });
+
+test('工作区技能同步与按 EduCoder 工作区隔离注入全账号 DSH_EDUCODER_ACCOUNTS', async t => {
+  const host = await bootRealCordisHost(t, { withSessionController: true, withSkills: true });
+  if (!host) {
+    t.skip('未发现 DSH 可执行入口，跳过工作区 Skill 与账号隔离集成测试。');
+    return;
+  }
+
+  const { root, ctx, importHost, workspace, capturedRequests, setStreamHandler, createUserMessage } = host;
+  const [sessionMod, nativeExecMod, sandboxMod, approvalMod] = await Promise.all([
+    importHost('@deepseek-ai/dsh-session'),
+    importHost('@deepseek-ai/dsh-tool-executor-native'),
+    importHost('@deepseek-ai/dsh-sandbox-policy'),
+    importHost('@deepseek-ai/dsh-user-approval'),
+  ]);
+  const sdkMod = {
+    sessionId: sessionMod.SessionId,
+    nativeExecutor: targetCtx => new nativeExecMod.NativeToolExecutor(targetCtx, () => 1),
+    setSandboxMode: sandboxMod.setSandboxMode,
+    setApprovalPolicy: approvalMod.setApprovalPolicy,
+  };
+  const sharedWorkspace = workspace.path;
+  const otherWorkspace = join(root, 'other-project');
+  await mkdir(otherWorkspace, { recursive: true });
+
+  const accounts = [
+    {
+      id: '11111111-1111-1111-1111-111111111111',
+      remoteUserId: '701',
+      label: 'u1***01',
+      status: 'ready',
+      session: { remoteUserId: '701', session: 'full-secret-a', autologin: 'auto-a', zzud: 'zzud-a' },
+    },
+    {
+      id: '22222222-2222-2222-2222-222222222222',
+      remoteUserId: '802',
+      label: 'u2***02',
+      status: 'ready',
+      session: { remoteUserId: '802', session: 'full-secret-b', autologin: 'auto-b', zzud: 'zzud-b' },
+    },
+  ];
+
+  // 1. 工作区初始化应同步 .dsh/skills/educoder-cli/SKILL.md 且仅在 EduCoder 工作区被 DSH skills 服务发现
+  const experienceState = await createExperience({
+    root: sharedWorkspace,
+    workspaceRegistry: {
+      async create() {
+        return workspace;
+      },
+    },
+  });
+  assert.ok(existsSync(join(sharedWorkspace, '.dsh', 'skills', 'educoder-cli', 'SKILL.md')));
+  const eduSkills = await ctx.skills.list({ cwd: sharedWorkspace });
+  const cliSkill = eduSkills.find(skill => skill.name === 'educoder-cli');
+  assert.ok(cliSkill, 'EduCoder 工作区内应能发现 educoder-cli skill');
+  const loadedSkill = await ctx.skills.get('educoder-cli', { cwd: sharedWorkspace });
+  assert.match(loadedSkill?.content ?? '', /DSH_EDUCODER_ACCOUNTS/);
+
+  const otherSkills = await ctx.skills.list({ cwd: otherWorkspace });
+  assert.equal(otherSkills.some(skill => skill.name === 'educoder-cli'), false, '非 EduCoder 工作区不应发现 educoder-cli skill');
+
+  // 2. 注册 workspace 作用域 shellEnv
+  registerWorkspaceShellEnv(ctx, {
+    sharedWorkspaceRoot: sharedWorkspace,
+    experience: experienceState,
+    getAccounts: () => accounts,
+    apiUrl: 'http://127.0.0.1:9299',
+  });
+
+  // 3. 在 EduCoder 工作区创建普通用户对话：拿到 DSH_EDUCODER_ACCOUNTS + CLI 环境，但不应注入单任务 SESSION/TARGET
+  const eduSessionId = sdkMod.sessionId(randomUUIDSafe());
+  await ctx.sessionController.create({ sessionId: eduSessionId, cwd: sharedWorkspace });
+  const eduAgent = (await ctx.sessionController.resolveAgent(eduSessionId)).agent;
+  await eduAgent.whenIdle();
+  eduAgent.model?.select?.({ provider: 'fixture', model: 'code' });
+  eduAgent.ctx.tools.setExecutor(sdkMod.nativeExecutor(eduAgent.ctx));
+  sdkMod.setSandboxMode(eduAgent.session, 'workspace-write');
+  sdkMod.setApprovalPolicy(eduAgent.session, 'never');
+
+  setStreamHandler(async function* (_opts, turn) {
+    if (turn % 2 === 1) {
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' };
+      yield {
+        type: 'tool-call-delta',
+        index: 0,
+        id: `call_env_probe_${turn}`,
+        name: 'bash',
+        argumentsDelta: JSON.stringify({
+          description: 'Inspect EduCoder env vars',
+          command: 'HAS_CLI=$(test -n "$DSH_EDUCODER_CLI" && echo yes || echo no); HAS_ACC=$(test -n "$DSH_EDUCODER_ACCOUNTS" && echo yes || echo no); HAS_SESS=$(test -n "$DSH_EDUCODER_SESSION" && echo yes || echo no); ACC_OUT=$(test -n "$DSH_EDUCODER_CLI" && node "$DSH_EDUCODER_CLI" accounts --json | tr "\\n" " " || echo NONE); echo "HAS_CLI=$HAS_CLI HAS_ACC=$HAS_ACC HAS_SESS=$HAS_SESS ACC_OUT=$ACC_OUT"',
+        }),
+      };
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } };
+      yield { type: 'finish', reason: { kind: 'tool-use' } };
+      return;
+    }
+    yield { type: 'block-start', index: 0, blockType: 'text' };
+    yield { type: 'text-delta', index: 0, text: 'Probe finished.' };
+    yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } };
+    yield { type: 'finish', reason: { kind: 'stop' } };
+  });
+
+  eduAgent.followup(createUserMessage('check accounts in workspace'));
+  await eduAgent.whenIdle();
+  const eduTranscript = JSON.stringify(capturedRequests.at(-1).messages ?? []);
+  assert.ok(eduTranscript.includes('HAS_CLI=yes'), 'EduCoder workspace chat must have DSH_EDUCODER_CLI');
+  assert.ok(eduTranscript.includes('HAS_ACC=yes'), 'EduCoder workspace chat must have DSH_EDUCODER_ACCOUNTS');
+  assert.ok(eduTranscript.includes('HAS_SESS=no'), 'Normal EduCoder workspace chat must NOT lock DSH_EDUCODER_SESSION');
+  assert.ok(eduTranscript.includes('u1***01') && eduTranscript.includes('u2***02'), 'accounts --json must expose all bound accounts');
+  assert.ok(!eduTranscript.includes('full-secret-a') && !eduTranscript.includes('full-secret-b'), 'accounts output must never print raw session cookies');
+
+  // 4. 普通非 EduCoder 工作区对话：shellEnv 返回 {}，完全拿不到任何 DSH_EDUCODER_* 变量
+  const otherSessionId = sdkMod.sessionId(randomUUIDSafe());
+  await ctx.sessionController.create({ sessionId: otherSessionId, cwd: otherWorkspace });
+  const otherAgent = (await ctx.sessionController.resolveAgent(otherSessionId)).agent;
+  await otherAgent.whenIdle();
+  otherAgent.model?.select?.({ provider: 'fixture', model: 'code' });
+  otherAgent.ctx.tools.setExecutor(sdkMod.nativeExecutor(otherAgent.ctx));
+  sdkMod.setSandboxMode(otherAgent.session, 'workspace-write');
+  sdkMod.setApprovalPolicy(otherAgent.session, 'never');
+
+  otherAgent.followup(createUserMessage('check isolation outside educoder workspace'));
+  await otherAgent.whenIdle();
+  const otherTranscript = JSON.stringify(capturedRequests.at(-1).messages ?? []);
+  assert.ok(otherTranscript.includes('HAS_CLI=no'), 'Non-EduCoder workspace must NOT receive DSH_EDUCODER_CLI');
+  assert.ok(otherTranscript.includes('HAS_ACC=no'), 'Non-EduCoder workspace must NOT receive DSH_EDUCODER_ACCOUNTS');
+  assert.ok(otherTranscript.includes('HAS_SESS=no'), 'Non-EduCoder workspace must NOT receive DSH_EDUCODER_SESSION');
+
+  // 5. Worker 回合及其结束后同一空闲会话的普通追问：Worker 回合锁定 SESSION 且多账号脱敏，完成后卸掉 SESSION 但保留工作区 ACCOUNTS
+  const runner = createAgentRunner(ctx, {
+    workspaceRoot: root,
+    sharedWorkspaceRoot: sharedWorkspace,
+    experience: Promise.resolve(experienceState),
+    apiUrl: 'http://127.0.0.1:9299',
+    provider: 'fixture',
+    model: 'code-custom',
+    maxSteps: 4,
+    maxTotalTokens: 10_000,
+    timeoutMs: 15_000,
+    extended: true,
+    getAccounts: () => accounts,
+  });
+
+  const workerResult = await runner({
+    accountRef: 'acc-701',
+    courseId: 'course-1',
+    homeworkId: 'hw-1',
+    taskId: 'game-1',
+    stageId: 'stage-1',
+    title: 'Worker Turn',
+    instructions: '检查 full-secret-b 不应出现在题面里。',
+    paths: ['main.py'],
+    session: accounts[0].session,
+  });
+  assert.equal(workerResult.status, 'finished');
+  const workerReq = capturedRequests.at(-1);
+  const workerTranscript = JSON.stringify(workerReq.messages ?? []);
+  assert.ok(workerTranscript.includes('HAS_CLI=yes'));
+  assert.ok(workerTranscript.includes('HAS_ACC=yes'));
+  assert.ok(workerTranscript.includes('HAS_SESS=yes'), 'Active worker turn must receive scoped DSH_EDUCODER_SESSION');
+  assert.ok(!workerTranscript.includes('full-secret-b'), 'Worker prompt must redact secrets from all accounts');
+
+  const idleWorkerAgent = ctx.agents.get(workerResult.sessionId);
+  assert.ok(idleWorkerAgent);
+  idleWorkerAgent.followup(createUserMessage('follow up in idle worker session'));
+  await idleWorkerAgent.whenIdle();
+  const followupTranscript = JSON.stringify(capturedRequests.at(-1).messages ?? []);
+  assert.ok(followupTranscript.includes('HAS_SESS=no'), 'Idle follow-up must clear task-locked DSH_EDUCODER_SESSION');
+  assert.ok(followupTranscript.includes('HAS_ACC=yes'), 'Idle follow-up inside EduCoder workspace retains DSH_EDUCODER_ACCOUNTS');
+});
+
+function randomUUIDSafe() {
+  return `${Date.now().toString(16)}-0000-4000-8000-${Math.random().toString(16).slice(2, 14).padEnd(12, '0')}`;
+}

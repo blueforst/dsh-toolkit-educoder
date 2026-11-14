@@ -70,6 +70,37 @@ export function createAccounts({ file, credentials, transport, queue }) {
   const authenticating = new Set();
   const exclusive = new Set();
   let closed = false;
+  let currentSnapshot = [];
+  let snapshotQueue = Promise.resolve();
+
+  async function buildSnapshot() {
+    if (closed) return currentSnapshot;
+    const rows = list.all();
+    const next = [];
+    for (const row of rows) {
+      if (closed) return currentSnapshot;
+      const record = await credentials.readRecord(key(row.id));
+      const grant = record?.kind === 'grant' && record.payload?.remoteUserId === row.remoteId ? record.payload : null;
+      next.push({
+        id: row.id,
+        remoteUserId: row.remoteId,
+        label: row.label,
+        status: row.status,
+        updatedAt: row.updatedAt,
+        ...(grant ? { session: { ...grant } } : {}),
+      });
+    }
+    if (!closed) currentSnapshot = next;
+    return currentSnapshot;
+  }
+
+  function syncSnapshot() {
+    const next = snapshotQueue.then(() => buildSnapshot());
+    snapshotQueue = next.catch(() => currentSnapshot);
+    return next;
+  }
+
+  const ready = syncSnapshot().catch(() => []);
 
   function find(id) {
     if (typeof id !== 'string' || !accountId.test(id)) fail('invalid_input');
@@ -81,6 +112,7 @@ export function createAccounts({ file, credentials, transport, queue }) {
   function update(row, status, label = row.label) {
     const updatedAt = new Date().toISOString();
     set.run(status, label, updatedAt, row.id);
+    void syncSnapshot();
     return projection({ ...row, status, label, updatedAt });
   }
 
@@ -116,7 +148,9 @@ export function createAccounts({ file, credentials, transport, queue }) {
 
   async function save(row, authenticated) {
     await credentials.modifyRecord(key(row.id), async () => ({ kind: 'grant', payload: authenticated.session }));
-    return update(row, 'ready', redactLabel(authenticated.label));
+    const projected = update(row, 'ready', redactLabel(authenticated.label));
+    await syncSnapshot();
+    return projected;
   }
 
   async function withSession(id, callback, { check = false, worker = false } = {}) {
@@ -126,7 +160,10 @@ export function createAccounts({ file, credentials, transport, queue }) {
     const record = await credentials.readRecord(key(id));
     if (record?.kind !== 'grant' || record.payload?.remoteUserId !== row.remoteId) {
       const latest = byId.get(id);
-      if (!exclusive.has(id) && latest && latest.status !== 'removed') update(latest, 'auth_required');
+      if (!exclusive.has(id) && latest && latest.status !== 'removed') {
+        update(latest, 'auth_required');
+        await syncSnapshot().catch(() => {});
+      }
       fail('auth_required');
     }
     try {
@@ -139,6 +176,7 @@ export function createAccounts({ file, credentials, transport, queue }) {
           (await credentials.readRecord(key(id)))?.payload?.session === record.payload.session &&
           !exclusive.has(id) && byId.get(id)?.status !== 'removed') {
         update(byId.get(id), state);
+        await syncSnapshot().catch(() => {});
       }
       throw error;
     }
@@ -146,6 +184,12 @@ export function createAccounts({ file, credentials, transport, queue }) {
 
   return {
     list: () => list.all().map(projection),
+    snapshot: () => currentSnapshot.map(entry => ({
+      ...entry,
+      ...(entry.session ? { session: { ...entry.session } } : {}),
+    })),
+    ready,
+    waitSnapshot: () => snapshotQueue.then(() => currentSnapshot),
     withSession,
     async add(login, password) {
       const result = await authenticate(login, password);
@@ -176,6 +220,7 @@ export function createAccounts({ file, credentials, transport, queue }) {
             exclusive.has(id) || byId.get(id)?.status === 'removed') fail('busy');
         return update(byId.get(id), result.verified === true ? 'ready' : 'unverified', redactLabel(result.label));
       }, { check: true });
+      await syncSnapshot();
       return state;
     },
     async remove(id) {
@@ -185,14 +230,15 @@ export function createAccounts({ file, credentials, transport, queue }) {
         await queue.waitForAccountIdle(id);
         await credentials.deleteRecord(key(id));
         update(row, 'removed', '***');
+        await syncSnapshot();
         return { id };
       });
     },
-    close() {
-      if (!closed) {
-        closed = true;
-        db.close();
-      }
+    async close() {
+      if (closed) return;
+      closed = true;
+      await snapshotQueue.catch(() => {});
+      db.close();
     },
   };
 }

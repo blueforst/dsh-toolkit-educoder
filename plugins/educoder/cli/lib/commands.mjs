@@ -17,8 +17,16 @@ export function helpText() {
     '用法:',
     '  node "$DSH_EDUCODER_CLI" <command> [options]',
     '',
+    '通用选项:',
+    '  --account <id|remoteUserId|label>                 指定使用的 EduCoder 账号（不传则使用默认会话或唯一可用账号）',
+    '  --course-id <id> --homework-id <id> [--task-id]   指定目标课程、实训作业和关卡（可省略 --task-id 自动解析当前/首关）',
+    '  --json                                            输出结构化 JSON',
+    '',
     '常用命令:',
-    '  inspect [--json]                                  查看当前关卡状态、代码文件路径、选择题和题面',
+    '  accounts [--json]                                 列出工作区可用 EduCoder 账号（不含 Cookie）',
+    '  courses [--account <selector>] [--json]           查看账号已加入课程列表',
+    '  homeworks --course-id <id> [--account <sel>]      查看课程下的实训作业与完成进度',
+    '  inspect [--no-open] [--json]                      查看当前关卡状态、代码文件路径、选择题和题面',
     '  read-file [remotePath] [--out <localFile>]        读取平台代码文件，可选同步到本地工作区文件',
     '  save-file [remotePath] --from <localFile>         从本地文件上传保存到 EduCoder 代码区（不触发评测）',
     '  save-file [remotePath] --content <text>|--stdin   直接传入内容保存到 EduCoder 代码区',
@@ -31,8 +39,8 @@ export function helpText() {
     '  cli-diff [file...]                                对比相对基线备份 (.baseline) 的本地源码改动',
     '  cli-restore [file...]                             从 .baseline 恢复指定或全部 CLI 文件',
     '',
-    '常用环境变量 (由 DSH 按当前任务隔离注入):',
-    '  DSH_EDUCODER_API_URL / DSH_EDUCODER_SESSION / DSH_EDUCODER_TARGET / DSH_EDUCODER_WORKDIR',
+    '常用环境变量 (由 DSH 在 EduCoder 工作区 / 任务回合注入):',
+    '  DSH_EDUCODER_ACCOUNTS / DSH_EDUCODER_API_URL / DSH_EDUCODER_SESSION / DSH_EDUCODER_TARGET / DSH_EDUCODER_WORKDIR',
   ].join('\n');
 }
 
@@ -43,7 +51,7 @@ function sha256Text(text) {
 async function saveWithState(transport, config, remotePath, content, task) {
   const safeContent = redactText(content, config);
   const prevState = await readCliState(config);
-  const targetKey = digestTarget(config.target);
+  const targetKey = digestTarget(config.target, config.session);
   await writeCliState(config, {
     ...prevState,
     targetKey,
@@ -73,9 +81,26 @@ async function saveWithState(transport, config, remotePath, content, task) {
   return proof;
 }
 
-function digestTarget(target) {
+function digestTarget(target, session) {
   if (!target) return '';
-  return `${target.courseId}:${target.homeworkId}:${target.taskId}:${target.advanceTo || ''}`;
+  const user = session?.remoteUserId || target.binding?.remoteUserId || '';
+  return `${user}:${target.courseId}:${target.homeworkId}:${target.taskId || ''}:${target.advanceTo || ''}`;
+}
+
+async function resolveBoundContext(transport, config, { open = true } = {}) {
+  if (config.target?.binding) {
+    return { config, task: undefined };
+  }
+  const task = await transport.inspect(config.session, config.target, { open });
+  const boundTarget = {
+    ...config.target,
+    taskId: task.binding?.taskId ?? config.target.taskId,
+    binding: task.binding,
+  };
+  return {
+    config: { ...config, target: boundTarget },
+    task,
+  };
 }
 
 async function writeLocalFile(path, data) {
@@ -341,6 +366,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
       stateFile: cliStatePath(config),
       apiUrl: config.apiUrl,
       proxyConfigured: Boolean(config.proxyUrl),
+      accountCount: config.accounts.length,
       sessionConfigured: Boolean(config.session),
       targetConfigured: Boolean(config.target),
       signingConfigured: Boolean(config.signingAccessKey && config.signingSecretKey),
@@ -362,10 +388,50 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
     return 0;
   }
 
+  if (command === 'accounts') {
+    const config = resolveCliConfig(flags, env, { requireSession: false, requireTarget: false });
+    const items = config.accounts.map(({ id, remoteUserId, label, status, hasSession, updatedAt }) => ({
+      id,
+      remoteUserId,
+      label,
+      status,
+      hasSession,
+      ...(updatedAt ? { updatedAt } : {}),
+    }));
+    printOutput(items, config, list => list.length
+      ? list.map(item => `- ${item.label} | id=${item.id} | remoteUserId=${item.remoteUserId} | status=${item.status} | hasSession=${item.hasSession}`).join('\n')
+      : '当前工作区没有已绑定的 EduCoder 账号。');
+    return 0;
+  }
+
+  if (command === 'courses') {
+    const config = resolveCliConfig(flags, env, { requireSession: true, requireTarget: false });
+    const items = await withTransport(config, t => t.courses(config.session));
+    printOutput(items, config, list => list.length
+      ? list.map(course => `- ${course.id} | ${course.title}`).join('\n')
+      : '当前账号没有加入任何课程。');
+    return 0;
+  }
+
+  if (command === 'homeworks') {
+    const config = resolveCliConfig(flags, env, { requireSession: true, requireTarget: false });
+    const courseId = (typeof flags['--course-id'] === 'string' ? flags['--course-id'] : undefined)
+      || args[0]
+      || config.target?.courseId;
+    if (!courseId) {
+      throw new UsageError('homeworks 需要传入 --course-id <courseId>（或作为位置参数）。');
+    }
+    const items = await withTransport(config, t => t.homeworks(config.session, courseId));
+    printOutput(items, config, list => list.length
+      ? list.map(hw => `- ${hw.id} | ${hw.title} (${hw.passedCount ?? 0}/${hw.taskCount ?? 0})`).join('\n')
+      : '该课程下没有实训作业。');
+    return 0;
+  }
+
   const config = resolveCliConfig(flags, env, { requireSession: true, requireTarget: true });
 
   if (command === 'inspect') {
-    const task = await withTransport(config, t => t.inspect(config.session, config.target));
+    const task = await withTransport(config, t => t.inspect(config.session, config.target, { open: !flags['--no-open'] }));
     printOutput(task, config, formatInspect);
     return 0;
   }
@@ -373,7 +439,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
   if (command === 'images') {
     const outDir = typeof flags['--download'] === 'string' ? resolve(flags['--download']) : undefined;
     const result = await withTransport(config, async t => {
-      const task = await t.inspect(config.session, config.target);
+      const task = await t.inspect(config.session, config.target, { open: !flags['--no-open'] });
       if (!task.imageCount) return { imageCount: 0, images: [], unavailable: Boolean(task.imagesUnavailable) };
       if (!outDir) {
         return {
@@ -404,15 +470,24 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
     if (!config.browserInspection) {
       throw new UsageError('当前未启用浏览器查看（DSH_EDUCODER_BROWSER_INSPECTION != 1）。');
     }
+    let resolvedTarget = config.target;
+    if (!resolvedTarget.binding) {
+      const inspected = await withTransport(config, t => t.inspect(config.session, resolvedTarget, { open: !flags['--no-open'] }));
+      resolvedTarget = {
+        ...resolvedTarget,
+        taskId: inspected.binding?.taskId ?? resolvedTarget.taskId,
+        binding: inspected.binding,
+      };
+    }
     const screenshotPath = typeof flags['--screenshot'] === 'string' ? resolve(flags['--screenshot']) : undefined;
     const inspectBrowser = createBrowserInspector({ proxy: config.proxyUrl });
     const result = await inspectBrowser({
       session: config.session,
       binding: {
-        ...(config.target.binding && typeof config.target.binding === 'object' ? config.target.binding : {}),
-        courseId: config.target.courseId,
-        homeworkId: config.target.homeworkId,
-        taskId: config.target.taskId,
+        ...(resolvedTarget.binding && typeof resolvedTarget.binding === 'object' ? resolvedTarget.binding : {}),
+        courseId: resolvedTarget.courseId,
+        homeworkId: resolvedTarget.homeworkId,
+        taskId: resolvedTarget.taskId,
         remoteUserId: config.session.remoteUserId,
       },
       screenshotPath,
@@ -428,9 +503,14 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
   if (command === 'read-file') {
     const outFile = typeof flags['--out'] === 'string' ? resolve(flags['--out']) : undefined;
     const result = await withTransport(config, async t => {
-      const task = await t.inspect(config.session, config.target);
+      const task = await t.inspect(config.session, config.target, { open: !flags['--no-open'] });
+      const resolvedTarget = {
+        ...config.target,
+        taskId: task.binding?.taskId ?? config.target.taskId,
+        binding: task.binding,
+      };
       const remotePath = resolveRemotePath(args[0], task);
-      const content = await t.readFile(config.session, config.target, remotePath);
+      const content = await t.readFile(config.session, resolvedTarget, remotePath);
       const writtenPath = outFile ? await writeLocalFile(outFile, content) : undefined;
       return { path: remotePath, content, savedTo: writtenPath };
     });
@@ -456,9 +536,17 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
     }
 
     const saved = await withTransport(config, async t => {
-      const task = await t.inspect(config.session, config.target);
+      const task = await t.inspect(config.session, config.target, { open: !flags['--no-open'] });
+      const boundConfig = {
+        ...config,
+        target: {
+          ...config.target,
+          taskId: task.binding?.taskId ?? config.target.taskId,
+          binding: task.binding,
+        },
+      };
       const remotePath = resolveRemotePath(args[0], task);
-      await saveWithState(t, config, remotePath, content, task);
+      await saveWithState(t, boundConfig, remotePath, content, task);
       return { ok: true, path: remotePath, bytes: Buffer.byteLength(content, 'utf8') };
     });
     printOutput(saved, config, val => `已保存远程文件 ${val.path} (${val.bytes} bytes)。下一步请运行 evaluate 提交评测。`);
@@ -471,13 +559,14 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
     const cmd = typeof flags['--cmd'] === 'string' ? flags['--cmd'] : args.join(' ');
     if (!cmd.trim()) throw new UsageError('请提供要执行的终端命令，例如: terminal -- ls -la');
     const res = await withTransport(config, async t => {
-      const output = await t.runTerminal(config.session, config.target, cmd);
+      const { config: boundConfig } = await resolveBoundContext(t, config, { open: !flags['--no-open'] });
+      const output = await t.runTerminal(boundConfig.session, boundConfig.target, cmd);
       if (output.proof) {
         const exported = t.exportProof(output.proof);
-        const prevState = await readCliState(config);
-        await writeCliState(config, {
+        const prevState = await readCliState(boundConfig);
+        await writeCliState(boundConfig, {
           ...prevState,
-          targetKey: digestTarget(config.target),
+          targetKey: digestTarget(boundConfig.target, boundConfig.session),
           proof: exported,
         });
       }
@@ -495,8 +584,9 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
     }
     const answers = parseChoicesInput(rawAnswers);
     const result = await withTransport(config, async t => {
-      const score = await t.submitChoices(config.session, config.target, answers);
-      const latest = await t.inspect(config.session, config.target).catch(() => undefined);
+      const { config: boundConfig } = await resolveBoundContext(t, config, { open: !flags['--no-open'] });
+      const score = await t.submitChoices(boundConfig.session, boundConfig.target, answers);
+      const latest = await t.inspect(boundConfig.session, boundConfig.target).catch(() => undefined);
       return { ...(latest ?? {}), ...score };
     });
     printOutput(result, config, formatEvaluationResult);
@@ -506,24 +596,33 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
   if (command === 'evaluate') {
     if (config.readOnly) throw new UsageError('当前为只读任务模式，禁止调用 evaluate。');
     const result = await withTransport(config, async t => {
+      let { config: boundConfig, task: initialTask } = await resolveBoundContext(t, config, { open: !flags['--no-open'] });
       let proof;
       let priorMarker;
-      const state = await readCliState(config);
+      const state = await readCliState(boundConfig);
       if (typeof flags['--from'] === 'string') {
         const content = await readFile(resolve(flags['--from']), 'utf8');
-        const task = await t.inspect(config.session, config.target);
+        const task = initialTask ?? await t.inspect(boundConfig.session, boundConfig.target);
+        boundConfig = {
+          ...boundConfig,
+          target: {
+            ...boundConfig.target,
+            taskId: task.binding?.taskId ?? boundConfig.target.taskId,
+            binding: task.binding,
+          },
+        };
         priorMarker = task.marker;
         const remotePath = resolveRemotePath(args[0], task);
-        proof = await saveWithState(t, config, remotePath, content, task);
-      } else if (state?.proof && (!state.targetKey || state.targetKey === digestTarget(config.target))) {
-        priorMarker = state.lastSave?.marker;
+        proof = await saveWithState(t, boundConfig, remotePath, content, task);
+      } else if (state?.proof && (!state.targetKey || state.targetKey === digestTarget(boundConfig.target, boundConfig.session))) {
+        priorMarker = state.lastSave?.marker ?? initialTask?.marker;
         if (priorMarker === undefined) {
-          const current = await t.inspect(config.session, config.target);
+          const current = await t.inspect(boundConfig.session, boundConfig.target);
           priorMarker = current.marker;
         }
         proof = t.restoreProof(state.proof);
       } else {
-        const task = await t.inspect(config.session, config.target);
+        const task = initialTask ?? await t.inspect(boundConfig.session, boundConfig.target);
         priorMarker = task.marker;
         proof = t.restoreProof({
           kind: task.kind === 'code' ? 'code' : 'terminal',
@@ -531,14 +630,14 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
           fallbackCurrent: true,
         });
       }
-      await t.evaluate(config.session, config.target, proof);
-      const latest = config.wait
-        ? await waitForEvaluation(t, config, priorMarker)
-        : await t.inspect(config.session, config.target);
-      const afterState = await readCliState(config);
-      await writeCliState(config, {
+      await t.evaluate(boundConfig.session, boundConfig.target, proof);
+      const latest = boundConfig.wait
+        ? await waitForEvaluation(t, boundConfig, priorMarker)
+        : await t.inspect(boundConfig.session, boundConfig.target);
+      const afterState = await readCliState(boundConfig);
+      await writeCliState(boundConfig, {
         ...afterState,
-        targetKey: digestTarget(config.target),
+        targetKey: digestTarget(boundConfig.target, boundConfig.session),
         lastEvaluation: {
           state: latest.state,
           evaluating: Boolean(latest.evaluating),

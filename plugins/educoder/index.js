@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createAgentRunner, createSaveEvidenceReader } from './agent.js';
+import { createAgentRunner, createSaveEvidenceReader, registerWorkspaceShellEnv } from './agent.js';
 import { createTransport } from './transport.js';
 import { createService } from './service.js';
 import { createExperience } from './experience.js';
@@ -125,6 +125,7 @@ export function apply(ctx) {
     let proxy;
     let service;
     let unregister;
+    let unregisterWorkspaceEnv;
     try {
       proxy = createEduCoderProxy(scopedProxy);
       const transport = createTransport({ baseUrl, terminalRunner, fetch: proxy.fetch });
@@ -154,6 +155,7 @@ export function apply(ctx) {
         terminalEnabled: process.env.DSH_EDUCODER_TERMINAL_ENABLED === '1',
         browserInspection: process.env.DSH_EDUCODER_BROWSER_INSPECTION === '1',
         readOnly: process.env.DSH_EDUCODER_READONLY_TASKS === '1',
+        getAccounts: () => service?.accountsSnapshot() ?? [],
       });
       service = createService({
         root,
@@ -175,14 +177,30 @@ export function apply(ctx) {
         mode: fixture ? 'fixture' : live ? 'live' : 'disabled',
         logger: ctx.logger,
       });
+      if (dedicated && (live || fixture || process.env.DSH_EDUCODER_WORKSPACE_DIR)) {
+        unregisterWorkspaceEnv = registerWorkspaceShellEnv(ctx, {
+          sharedWorkspaceRoot,
+          experience,
+          getAccounts: () => service.accountsSnapshot(),
+          apiUrl: baseUrl,
+          proxyUrl: httpsProxy,
+          signingAccessKey: process.env.EDUCODER_SIGNING_ACCESS_KEY,
+          signingSecretKey: process.env.EDUCODER_SIGNING_SECRET_KEY,
+          terminalEnabled: process.env.DSH_EDUCODER_TERMINAL_ENABLED === '1',
+          browserInspection: process.env.DSH_EDUCODER_BROWSER_INSPECTION === '1',
+          readOnly: process.env.DSH_EDUCODER_READONLY_TASKS === '1',
+        });
+      }
       unregister = registerApi(ctx, service);
     } catch (error) {
+      unregisterWorkspaceEnv?.();
       void service?.close();
       void proxy?.close();
       throw error;
     }
     return async () => {
       unregister();
+      unregisterWorkspaceEnv?.();
       try { await service.close(); } finally {
         await proxy.close();
       }

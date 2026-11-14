@@ -1,6 +1,6 @@
 {
   "name": "@forst/dsh-educoder",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "description": "在专用 DSH Web 实例中管理独立的 EduCoder 账号、作业和评测队列。",
   "type": "module",
   "main": "./index.js",
@@ -10,7 +10,7 @@
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
-  "files": ["*.js", "cli", "cordis.patch.yml", "README.md", "LICENSE"],
+  "files": ["*.js", "cli", "skills", "cordis.patch.yml", "README.md", "LICENSE"],
   "engines": {"node": ">=24.9", "dsh": "0.2.2-alpha.2"},
   "dsh": {
     "bundle": {"patch": "./cordis.patch.yml"},

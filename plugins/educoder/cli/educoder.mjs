@@ -14,6 +14,13 @@ try {
         return undefined;
       }
     })(),
+    accounts: (() => {
+      try {
+        return process.env.DSH_EDUCODER_ACCOUNTS ? JSON.parse(process.env.DSH_EDUCODER_ACCOUNTS) : undefined;
+      } catch {
+        return undefined;
+      }
+    })(),
     signingAccessKey: process.env.DSH_EDUCODER_SIGNING_AK || process.env.EDUCODER_SIGNING_ACCESS_KEY,
     signingSecretKey: process.env.DSH_EDUCODER_SIGNING_SK || process.env.EDUCODER_SIGNING_SECRET_KEY,
   };

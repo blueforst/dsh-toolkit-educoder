@@ -5,8 +5,10 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 
 const SOURCE_CLI_ROOT = fileURLToPath(new URL('./cli/', import.meta.url));
+const SOURCE_SKILLS_ROOT = fileURLToPath(new URL('./skills/', import.meta.url));
 const MANIFEST_NAME = '.manifest.json';
 const SYNC_QUEUES = new Map();
+const SKILL_SYNC_QUEUES = new Map();
 
 function ensureInside(root, target) {
   const rel = relative(root, target);
@@ -78,16 +80,56 @@ function sha256Buffer(buffer) {
 }
 
 /**
+ * Seed or upgrade `<workspaceRoot>/.dsh/skills/educoder-cli/SKILL.md` so DSH natively
+ * discovers multi-account EduCoder CLI instructions inside the workspace.
+ */
+export async function syncWorkspaceSkill(workspaceRoot, {
+  sourceRoot = SOURCE_SKILLS_ROOT,
+} = {}) {
+  const rootCanonical = await realpath(resolve(workspaceRoot));
+  const previous = SKILL_SYNC_QUEUES.get(rootCanonical) ?? Promise.resolve();
+  const current = previous.catch(() => {}).then(async () => {
+    const srcSkill = join(sourceRoot, 'educoder-cli', 'SKILL.md');
+    let data;
+    try {
+      data = await readFile(srcSkill);
+    } catch (error) {
+      if (error?.code === 'ENOENT') return undefined;
+      throw error;
+    }
+    const dshDir = await ensureRealDirectory(join(rootCanonical, '.dsh'), rootCanonical);
+    const skillsDir = await ensureRealDirectory(join(dshDir, 'skills'), dshDir);
+    const skillDir = await ensureRealDirectory(join(skillsDir, 'educoder-cli'), skillsDir);
+    const skillPath = join(skillDir, 'SKILL.md');
+    await writeSafeFile(skillPath, data, 0o644);
+    return skillPath;
+  });
+  SKILL_SYNC_QUEUES.set(rootCanonical, current);
+  try {
+    return await current;
+  } finally {
+    if (SKILL_SYNC_QUEUES.get(rootCanonical) === current) {
+      SKILL_SYNC_QUEUES.delete(rootCanonical);
+    }
+  }
+}
+
+/**
  * Seed or upgrade the shared editable CLI workspace under `<workspaceRoot>/cli`,
  * keeping `.baseline/` in sync while preserving model/operator edits to live files.
  */
 export async function syncCliWorkspace(workspaceRoot, {
   sourceRoot = SOURCE_CLI_ROOT,
+  skillSourceRoot = SOURCE_SKILLS_ROOT,
   reset = process.env.DSH_EDUCODER_CLI_RESET === '1',
 } = {}) {
   const rootCanonical = await realpath(resolve(workspaceRoot));
   const previous = SYNC_QUEUES.get(rootCanonical) ?? Promise.resolve();
-  const current = previous.catch(() => {}).then(() => performSyncCliWorkspace(rootCanonical, { sourceRoot, reset }));
+  const current = previous.catch(() => {}).then(async () => {
+    const result = await performSyncCliWorkspace(rootCanonical, { sourceRoot, reset });
+    await syncWorkspaceSkill(rootCanonical, { sourceRoot: skillSourceRoot }).catch(() => {});
+    return result;
+  });
   SYNC_QUEUES.set(rootCanonical, current);
   try {
     return await current;

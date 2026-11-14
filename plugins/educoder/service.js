@@ -196,11 +196,17 @@ export function createService({
       request.then(done, done);
       return request;
     },
+    accountsSnapshot() {
+      return allowed() ? accounts.snapshot() : [];
+    },
+    waitAccountsReady() {
+      return accounts.ready;
+    },
     async close() {
       closed = true;
       await Promise.allSettled([...requests]);
       await queue.close();
-      accounts.close();
+      await accounts.close();
     },
   };
 }

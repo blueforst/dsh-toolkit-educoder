@@ -1,5 +1,12 @@
 # 版本记录
 
+## @forst/dsh-educoder 0.2.10 · 2026-11-14
+
+- **EduCoder 工作区全账号视图与原生 Skill**：
+  - `accounts.js` 与 `service.js` 在内存中同步维护 `dsh-educoder/account-*` 账号凭据快照，并在 `close()` 时排空同步队列；`registerWorkspaceShellEnv()` 通过 `ctx.shellEnv` 严格按工作区隔离注入 `DSH_EDUCODER_ACCOUNTS` 与共享 CLI 环境——仅「EduCoder」工作区内的对话（含空闲续问与普通会话）及 EduCoder Worker 会话可见，非 EduCoder 工作区会话返回 `{}`，零跨工作区凭据泄露且不暴露宿主其他凭据或落盘明文。
+  - 工作区初始化与 `syncCliWorkspace()` 自动同步 `.dsh/skills/educoder-cli/SKILL.md`，由 DSH 原生 `ctx.skills` 发现并指引模型用法，不额外向系统/任务提示词注入多账号提示词。
+  - 工作区 CLI 新增 `accounts`（不打印原始 Cookie）、`courses`、`homeworks` 与 `--account <id|remoteUserId|label>`（支持单可用账号自动选中、切换账号或课程/作业时自动清除过期 `binding`，以及省略 `--task-id` 自动解析首关并串联 `inspect` -> `read-file`/`save-file`/`evaluate`/`submit-choices`/`terminal`/`browser`），并把全账号 Cookie 纳入 `redactText` / `effectiveRedact` 脱敏范围。
+
 ## @forst/dsh-educoder 0.2.9 · 2026-11-14
 
 - **DSH 原生 `SessionController` 常驻会话流程**（`0.2.7` → `0.2.9`）：作业会话改由 `sessionController.create()` 创建与恢复，`Agent` 回合结束后正常回到 `idle` 并留在「EduCoder」工作区与侧栏会话列表中，不再人工调用 `session/disposed` 或移除面板会话。

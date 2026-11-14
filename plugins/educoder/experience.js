@@ -1,11 +1,13 @@
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, realpath } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
-import { ensureTaskWorkdir, syncCliWorkspace } from './cli-workspace.js';
+import { ensureTaskWorkdir, syncCliWorkspace, syncWorkspaceSkill } from './cli-workspace.js';
 
 const README = `# EduCoder 专属工作区
 
 这里集中保存 EduCoder 解题会话和可复用的解题经验。DS 会在开始新关卡时参考《解题经验》。
+
+工作区内置了可编辑 CLI（\`./cli/educoder.mjs\`）及原生工作区技能（\`.dsh/skills/educoder-cli/SKILL.md\`），可在 EduCoder 工作区对话中查询所有已绑定账号、课程、作业和关卡通关状态。
 
 关卡通过平台评测后，可以记录一句可迁移的方法或排查经验。账号信息、平台凭据、作业答案和隐藏测试不写入共享经验。
 `;
@@ -66,6 +68,7 @@ export async function createExperience({ root, workspaceRegistry }) {
   await seed(join(canonical, 'README.md'), README);
   await seed(file, SEED);
   const cli = await syncCliWorkspace(canonical);
+  await syncWorkspaceSkill(canonical);
   let workspace = workspaceRegistry ? await workspaceRegistry.create(canonical, 'EduCoder') : undefined;
   let attachQueue = Promise.resolve();
   let writes = Promise.resolve();

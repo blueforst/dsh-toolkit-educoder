@@ -77,6 +77,7 @@ function setup(t, { allowAccounts = true, allowTasks = true, mode = 'disabled', 
   });
   return {
     root, stored, state, authAttempts, inspected,
+    service: () => service,
     api: (action, fields = {}) => service.execute({ action, ...fields }),
     async reopen() {
       await service.close();
@@ -343,4 +344,41 @@ test('一键通关会重启队列中已暂停的任务，将待评审任务计�
 
   const afterPass = await api('startCourse', selected);
   assert.deepEqual(afterPass, { tasks: [], started: 0, skippedCompleted: 2, skippedExisting: 1 });
+});
+
+test('accountsSnapshot 随账号增删重登与重开同步更新且尊重 allowAccounts 隔离策略', async t => {
+  const ctx = setup(t, { allowAccounts: true });
+  await ctx.service().waitAccountsReady();
+  assert.deepEqual(ctx.service().accountsSnapshot(), []);
+
+  const accA = await bind(ctx.api, people[0]);
+  const accB = await bind(ctx.api, people[1]);
+  const snap1 = ctx.service().accountsSnapshot();
+  assert.equal(snap1.length, 2);
+  assert.deepEqual(
+    snap1.map(item => ({ id: item.id, remoteUserId: item.remoteUserId, hasSession: Boolean(item.session?.session) }))
+      .sort((a, b) => a.remoteUserId.localeCompare(b.remoteUserId)),
+    [
+      { id: accA.id, remoteUserId: '101', hasSession: true },
+      { id: accB.id, remoteUserId: '202', hasSession: true },
+    ],
+  );
+
+  await ctx.api('removeAccount', { accountId: accA.id });
+  const snapAfterRemove = ctx.service().accountsSnapshot();
+  assert.equal(snapAfterRemove.length, 1);
+  assert.equal(snapAfterRemove[0].id, accB.id);
+
+  // 关闭并重开服务，验证启动后 waitAccountsReady 能完整恢复内存中全部账号快照
+  await ctx.reopen();
+  await ctx.service().waitAccountsReady();
+  const snapReopened = ctx.service().accountsSnapshot();
+  assert.equal(snapReopened.length, 1);
+  assert.equal(snapReopened[0].remoteUserId, '202');
+  assert.equal(snapReopened[0].session.session, 'private-session-202');
+
+  // 关闭 allowAccounts 后不应暴露任何账号凭据快照
+  const disabled = setup(t, { allowAccounts: false });
+  await disabled.service().waitAccountsReady();
+  assert.deepEqual(disabled.service().accountsSnapshot(), []);
 });

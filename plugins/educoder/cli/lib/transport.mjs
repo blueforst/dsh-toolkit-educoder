@@ -594,7 +594,7 @@ export function createTransport({
 
   async function inspect(session, target, options) {
     const signal = readSignal(options)
-    if (target?.binding || target?.taskId) {
+    if (target?.binding) {
       const { account, task } = await pinnedTask(session, target, signal)
       if (target.advanceTo === undefined) return task
       const nextId = identifier(target.advanceTo)
@@ -606,6 +606,13 @@ export function createTransport({
     if (!(await courses(account, signal)).some(course => course.id === scope.courseId)) fail('invalid_scope')
     const homework = (await homeworks(account, scope.courseId, signal)).find(item => item.id === scope.homeworkId)
     if (!homework) fail('invalid_scope')
+    if (target?.taskId !== undefined) {
+      const { task } = await rawTask(account, scope, identifier(target.taskId), homework.practiceId, signal)
+      if (target.advanceTo === undefined) return task
+      const nextId = identifier(target.advanceTo)
+      if (task.state !== 'passed' || task.nextTaskId !== nextId) fail('invalid_scope')
+      return (await rawTask(account, task.binding, nextId, task.binding.practiceId, signal)).task
+    }
     let entry
     let practiceId = homework.practiceId
     if (practiceId) {

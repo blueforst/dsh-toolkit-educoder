@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
+import { constants, realpathSync } from 'node:fs';
 import { lstat, mkdir, open, realpath, rename } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ensureTaskWorkdir, syncCliWorkspace } from './cli-workspace.js';
 import { resolveDshModule } from './cli/lib/dsh-require.mjs';
@@ -46,6 +46,7 @@ const DSH_EDUCODER_ENV_VARS = Object.freeze({
   DSH_EDUCODER_SHARED_ROOT: { description: 'Shared persistent EduCoder workspace root.' },
   DSH_EDUCODER_API_URL: { description: 'EduCoder HTTP API base URL for CLI requests.' },
   DSH_EDUCODER_HTTPS_PROXY: { description: 'Optional outbound HTTPS proxy URL for EduCoder CLI requests.' },
+  DSH_EDUCODER_ACCOUNTS: { description: 'EduCoder bound accounts snapshot JSON injected inside the EduCoder workspace.' },
   DSH_EDUCODER_SESSION: { description: 'Scoped EduCoder session JSON injected only for the active task agent.' },
   DSH_EDUCODER_TARGET: { description: 'Locked EduCoder course/homework/task target JSON for the active task.' },
   DSH_EDUCODER_SIGNING_AK: { description: 'EduCoder API request signing access key when configured.' },
@@ -222,6 +223,73 @@ function compactStringRecord(entries) {
   return result;
 }
 
+function buildAccountsEnv(accounts) {
+  if (!Array.isArray(accounts)) return undefined;
+  return JSON.stringify(accounts.map(account => ({
+    id: account.id,
+    remoteUserId: account.remoteUserId,
+    label: account.label,
+    status: account.status,
+    ...(account.updatedAt ? { updatedAt: account.updatedAt } : {}),
+    ...(account.session ? {
+      session: {
+        remoteUserId: account.session.remoteUserId,
+        zzud: account.session.zzud,
+        autologin: account.session.autologin,
+        session: account.session.session,
+      },
+    } : {}),
+  })));
+}
+
+function normalizeRootCandidates(roots) {
+  const normalized = new Set();
+  for (const candidate of roots) {
+    if (typeof candidate !== 'string' || !candidate) continue;
+    const resolved = resolve(candidate);
+    normalized.add(resolved);
+    try {
+      normalized.add(realpathSync(resolved));
+    } catch {}
+  }
+  return [...normalized];
+}
+
+function isSameOrInside(rootPath, candidatePath) {
+  if (typeof candidatePath !== 'string' || !candidatePath) return false;
+  const resolvedCandidate = resolve(candidatePath);
+  const candidates = [resolvedCandidate];
+  try {
+    candidates.push(realpathSync(resolvedCandidate));
+  } catch {}
+  return candidates.some(target => {
+    const rel = relative(rootPath, target);
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  });
+}
+
+function isEduCoderWorkspaceAgent(ctx, agent, provider) {
+  if (!agent || !provider) return false;
+  const shared = provider.getShared?.();
+  const session = agent.session;
+  const sessionId = session?.header?.id ? String(session.header.id) : undefined;
+  if (sessionId && (shared?.workspace?.sessionIds?.has?.(sessionId) || shared?.sessionIds?.has?.(sessionId))) {
+    return true;
+  }
+  const roots = normalizeRootCandidates([
+    provider.sharedWorkspaceRoot,
+    shared?.root,
+    shared?.workspace?.path,
+  ]);
+  if (!roots.length) return false;
+  const workingDirectory = ctx.get?.('workingDirectory', false) ?? ctx.workingDirectory;
+  const committedCwd = session && typeof workingDirectory?.get === 'function'
+    ? workingDirectory.get(session)
+    : undefined;
+  const candidateCwds = [committedCwd, session?.header?.cwd];
+  return candidateCwds.some(cwd => roots.some(root => isSameOrInside(root, cwd)));
+}
+
 function ensureShellEnvStore(ctx) {
   const shellEnv = ctx.get?.('shellEnv', false) ?? ctx.shellEnv;
   if (!shellEnv || typeof shellEnv.register !== 'function') return undefined;
@@ -231,25 +299,110 @@ function ensureShellEnvStore(ctx) {
   let store = SHELL_ENV_STORES.get(target);
   if (store) return store;
   const agentEnvs = new WeakMap();
+  const storeRef = { agentEnvs, workspaceProvider: undefined };
   const unregister = shellEnv.register({
     name: 'educoder-cli-env',
     variables: DSH_EDUCODER_ENV_VARS,
     resolve(exec) {
-      const envMap = exec?.agent ? agentEnvs.get(exec.agent) : undefined;
-      return envMap ? { ...envMap } : {};
+      const agent = exec?.agent;
+      if (!agent) return {};
+      const provider = storeRef.workspaceProvider;
+      const accountsEnv = provider ? buildAccountsEnv(provider.getAccounts?.()) : undefined;
+      const envMap = agentEnvs.get(agent);
+      if (envMap) {
+        return {
+          ...envMap,
+          ...(accountsEnv ? { DSH_EDUCODER_ACCOUNTS: accountsEnv } : {}),
+        };
+      }
+      if (!provider || !isEduCoderWorkspaceAgent(ctx, agent, provider)) {
+        return {};
+      }
+      const workspaceBase = provider.buildBaseEnv?.() ?? {};
+      return compactStringRecord({
+        ...workspaceBase,
+        ...(accountsEnv ? { DSH_EDUCODER_ACCOUNTS: accountsEnv } : {}),
+      });
     },
   });
-  store = { agentEnvs };
+  store = storeRef;
   SHELL_ENV_STORES.set(target, store);
   if (typeof ctx.effect === 'function') {
     ctx.effect(() => () => {
       if (SHELL_ENV_STORES.get(target) === store) {
         SHELL_ENV_STORES.delete(target);
       }
+      store.workspaceProvider = undefined;
       unregister?.();
     });
   }
   return store;
+}
+
+export function registerWorkspaceShellEnv(ctx, {
+  sharedWorkspaceRoot,
+  experience,
+  getAccounts,
+  apiUrl,
+  proxyUrl,
+  signingAccessKey,
+  signingSecretKey,
+  terminalEnabled = false,
+  browserInspection = false,
+  readOnly = false,
+} = {}) {
+  const store = ensureShellEnvStore(ctx);
+  if (!store) return () => {};
+  let sharedState;
+  let active = true;
+  if (experience && typeof experience.then === 'function') {
+    experience.then(resolved => {
+      if (active) sharedState = resolved;
+    }, () => {});
+  } else {
+    sharedState = experience;
+  }
+  const provider = {
+    sharedWorkspaceRoot: sharedWorkspaceRoot ? resolve(sharedWorkspaceRoot) : undefined,
+    getShared: () => sharedState,
+    getAccounts,
+    buildBaseEnv: () => {
+      const rootDir = sharedState?.root ?? provider.sharedWorkspaceRoot;
+      if (!rootDir) return {};
+      let canonicalRoot = rootDir;
+      try {
+        canonicalRoot = realpathSync(rootDir);
+      } catch {}
+      const cliRoot = sharedState?.cli?.cliRoot ?? join(canonicalRoot, 'cli');
+      const entrypoint = sharedState?.cli?.entrypoint ?? join(cliRoot, 'educoder.mjs');
+      return {
+        DSH_EDUCODER_CLI: entrypoint,
+        DSH_EDUCODER_CLI_ROOT: cliRoot,
+        DSH_EDUCODER_SHARED_ROOT: canonicalRoot,
+        DSH_EDUCODER_API_URL: apiUrl,
+        DSH_EDUCODER_HTTPS_PROXY: proxyUrl,
+        DSH_EDUCODER_SIGNING_AK: signingAccessKey ?? process.env.EDUCODER_SIGNING_ACCESS_KEY,
+        DSH_EDUCODER_SIGNING_SK: signingSecretKey ?? process.env.EDUCODER_SIGNING_SECRET_KEY,
+        DSH_EDUCODER_READONLY: readOnly ? '1' : '0',
+        DSH_EDUCODER_TERMINAL_ENABLED: terminalEnabled ? '1' : '0',
+        DSH_EDUCODER_BROWSER_INSPECTION: browserInspection ? '1' : '0',
+        DSH_EDUCODER_UNDICI: resolveOptionalDshModule('undici', 'DSH_EDUCODER_UNDICI'),
+        DSH_EDUCODER_PLAYWRIGHT: resolveOptionalDshModule('playwright-core', 'DSH_EDUCODER_PLAYWRIGHT'),
+        DSH_EDUCODER_CHROMIUM_PATH: process.env.DSH_EDUCODER_CHROMIUM_PATH,
+      };
+    },
+  };
+  store.workspaceProvider = provider;
+  const dispose = () => {
+    active = false;
+    if (store.workspaceProvider === provider) {
+      store.workspaceProvider = undefined;
+    }
+  };
+  if (typeof ctx.effect === 'function') {
+    ctx.effect(() => dispose);
+  }
+  return dispose;
 }
 
 function optionalPositiveInt(value, max = Number.MAX_SAFE_INTEGER) {
@@ -405,11 +558,14 @@ export function createSaveEvidenceReader(ctx, optionsOrLoader = loadDshRuntime) 
   };
 }
 
-function redactSessionSecrets(text, session) {
+function redactSessionSecrets(text, session, extraAccounts = []) {
   let out = String(text ?? '');
-  for (const secret of [session?.session, session?.autologin, session?.zzud]) {
-    if (typeof secret === 'string' && secret.length >= 4) {
-      out = out.replaceAll(secret, '[已脱敏]').replaceAll(encodeURIComponent(secret), '[已脱敏]');
+  const sessions = [session, ...(Array.isArray(extraAccounts) ? extraAccounts.map(item => item?.session) : [])];
+  for (const candidate of sessions) {
+    for (const secret of [candidate?.session, candidate?.autologin, candidate?.zzud]) {
+      if (typeof secret === 'string' && secret.length >= 4) {
+        out = out.replaceAll(secret, '[已脱敏]').replaceAll(encodeURIComponent(secret), '[已脱敏]');
+      }
     }
   }
   return out;
@@ -510,6 +666,7 @@ export function createAgentRunner(ctx, {
   terminalEnabled = false,
   browserInspection = false,
   readOnly = false,
+  getAccounts,
   runtimeLoader = loadDshRuntime,
 } = {}) {
   if (typeof workspaceRoot !== 'string' || !isAbsolute(workspaceRoot)) {
@@ -547,7 +704,11 @@ export function createAgentRunner(ctx, {
     let scopeKey;
     let phase = 'agent_setup_failed';
     const controller = new AbortController();
-    const effectiveRedact = value => redactSessionSecrets(redact(value), task.session ?? {});
+    const effectiveRedact = value => redactSessionSecrets(
+      redact(value),
+      task.session ?? {},
+      typeof getAccounts === 'function' ? getAccounts() : [],
+    );
     function warnFailure(failurePhase, error) {
       if (failureLogged || !ctx.logger?.warn) return;
       failureLogged = true;
@@ -620,6 +781,7 @@ export function createAgentRunner(ctx, {
         DSH_EDUCODER_SHARED_ROOT: cwdCanonical,
         DSH_EDUCODER_API_URL: task.apiUrl ?? apiUrl,
         DSH_EDUCODER_HTTPS_PROXY: task.proxyUrl ?? proxyUrl,
+        ...(typeof getAccounts === 'function' ? { DSH_EDUCODER_ACCOUNTS: buildAccountsEnv(getAccounts()) } : {}),
         DSH_EDUCODER_SESSION: task.session ? JSON.stringify({
           remoteUserId: task.session.remoteUserId,
           session: task.session.session,
