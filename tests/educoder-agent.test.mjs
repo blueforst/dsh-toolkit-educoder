@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -11,8 +12,8 @@ import {
   NATIVE_CODING_TOOLS,
   createAgentRunner,
   createSaveEvidenceReader,
-  installEduCoderToolBoundary,
 } from '../plugins/educoder/agent.js';
+import { apply as applyEduCoderPlugin } from '../plugins/educoder/index.js';
 import { writeCliState } from '../plugins/educoder/cli/lib/state.mjs';
 
 class SessionNotFound extends Error {}
@@ -36,6 +37,9 @@ function createMockShellEnv() {
       for (const [key, spec] of Object.entries(contributor.variables)) {
         assert.match(key, /^DSH_[A-Z][A-Z0-9_]*$/);
         assert.ok(typeof spec.description === 'string' && spec.description.trim().length > 0);
+      }
+      if (contributors.has(contributor.name)) {
+        throw new Error(`bash env contributor "${contributor.name}" is already registered`);
       }
       contributors.set(contributor.name, contributor);
       return () => contributors.delete(contributor.name);
@@ -519,27 +523,53 @@ test('Agent 异常失败时记录脱敏日志且不泄露会话凭据', async t 
   assert.ok(!serialized.includes('private'));
 });
 
-test('专用实例的全局工具边界仅临时授权正在运行的 Agent 执行原生编码工具', async t => {
-  let globalGuard;
-  const toolBoundary = installEduCoderToolBoundary({
-    tools: { guard(guard) { globalGuard = guard; return () => { globalGuard = undefined; }; } },
+test('专用实例也不向宿主挂载全局 tools.guard，仅按会话回合在 agentCtx 上临时限制工具', async t => {
+  const stateDir = await realpath(await mkdtemp(join(tmpdir(), 'dsh-no-global-guard-')));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const prevEnv = {
+    DSH_EDUCODER_DEDICATED: process.env.DSH_EDUCODER_DEDICATED,
+    DSH_EDUCODER_PUBLIC_ADMIN: process.env.DSH_EDUCODER_PUBLIC_ADMIN,
+    DSH_EDUCODER_STATE_DIR: process.env.DSH_EDUCODER_STATE_DIR,
+    DSH_EDUCODER_LIVE_ACCOUNTS: process.env.DSH_EDUCODER_LIVE_ACCOUNTS,
+  };
+  process.env.DSH_EDUCODER_DEDICATED = '1';
+  delete process.env.DSH_EDUCODER_PUBLIC_ADMIN;
+  process.env.DSH_EDUCODER_STATE_DIR = stateDir;
+  delete process.env.DSH_EDUCODER_LIVE_ACCOUNTS;
+  t.after(() => {
+    for (const [k, v] of Object.entries(prevEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   });
-  t.after(toolBoundary.dispose);
-  const { runs, run } = await fixture(t, async ({ record, beginStep, finishStep, finishTurn }) => {
-    const exec = { name: 'bash', agent: record.agent };
-    assert.equal(globalGuard(exec), undefined);
-    assert.equal(globalGuard({ ...exec, name: 'read' }), undefined);
-    assert(globalGuard({ ...exec, agent: {} }));
-    assert(globalGuard({ ...exec, parent: {} }));
-    assert(globalGuard({ ...exec, name: 'educoder_evaluate' }));
-    assert(globalGuard({ ...exec, name: 'web_search' }));
-    assert(globalGuard({ name: 'bash' }));
+
+  let cleanups = [];
+  let globalGuardCalls = 0;
+  applyEduCoderPlugin({
+    tools: { guard() { globalGuardCalls++; return () => {}; } },
+    credentials: {},
+    connection: { requestRejection: () => undefined },
+    webServer: { register: () => () => {} },
+    logger: { warn() {}, info() {}, error() {} },
+    effect(fn) {
+      const cleanup = fn();
+      if (typeof cleanup === 'function') cleanups.push(cleanup);
+      return cleanup;
+    },
+    get: () => undefined,
+  });
+  for (const dispose of cleanups) await dispose();
+  assert.equal(globalGuardCalls, 0);
+
+  const { run } = await fixture(t, async ({ record, beginStep, finishStep, finishTurn }) => {
+    assert.equal(record.guard({ name: 'bash', agent: record.agent }), undefined);
+    assert(record.guard({ name: 'web_search', agent: record.agent }));
+    assert(record.guard({ name: 'bash', agent: record.agent, parent: {} }));
     assert.equal(await beginStep(), 'enter');
     finishStep(usage);
     finishTurn();
-  }, { toolBoundary });
+  });
   assert.equal((await run(codeTask())).status, 'finished');
-  assert(globalGuard({ name: 'bash', agent: runs[0].agent }));
 });
 
 test('createSaveEvidenceReader 可读取 CLI 状态文件中的保存记录并拒绝符号链接', async t => {
@@ -558,6 +588,10 @@ test('createSaveEvidenceReader 可读取 CLI 状态文件中的保存记录并�
     path: 'src/answer.py',
     content: 'print(42)',
   });
+  const readWhileRunning = createSaveEvidenceReader({
+    agents: { get: () => ({ status: 'running' }) },
+  }, { sharedWorkspaceRoot: sharedRoot });
+  assert.equal(await readWhileRunning(first.sessionId, new AbortController().signal), undefined);
 
   // 符号链接状态文件必须被拒绝
   const evilTarget = join(workspaceRoot, 'outside.json');
@@ -645,6 +679,88 @@ test('超图限制仍保留前几张有效参考图并附加 CLI 图片/浏览�
   assert.equal(result.status, 'finished');
 });
 
+test('Cordis 每次 get("shellEnv") 返回新代理以及缺少/重建工作区时，多次与并发任务均可创建并上报会话', async t => {
+  const cordisOriginal = Symbol.for('cordis.original');
+  const effectCleanups = [];
+  const rawShellEnv = createMockShellEnv();
+  const makeProxy = target => new Proxy(target, {
+    get(obj, prop, receiver) {
+      if (prop === cordisOriginal) return obj;
+      return Reflect.get(obj, prop, receiver);
+    },
+  });
+  let proxyGets = 0;
+  let attachCalls = 0;
+  const attached = [];
+  const { run, runs } = await fixture(t, async ({ record, finishTurn }) => {
+    const env = rawShellEnv.resolveForAgent(record.agent);
+    assert.ok(env.DSH_EDUCODER_CLI);
+    assert.ok(env.DSH_EDUCODER_WORKDIR);
+    finishTurn();
+  }, {
+    experience: Promise.resolve({
+      workspace: undefined,
+      read: async () => '',
+      async attachSession(id) {
+        attachCalls++;
+        if (attachCalls === 2) throw new Error('workspace disappeared');
+        attached.push(id);
+      },
+    }),
+  }, {
+    get(name) {
+      if (name === 'shellEnv') {
+        proxyGets++;
+        return makeProxy(rawShellEnv);
+      }
+      return undefined;
+    },
+    effect(fn) {
+      const cleanup = fn();
+      if (typeof cleanup === 'function') effectCleanups.push(cleanup);
+      return cleanup;
+    },
+  });
+  const makeRun = (taskId, accountRef) => {
+    const onSessionIds = [];
+    return {
+      onSessionIds,
+      promise: run(codeTask({
+        taskId,
+        stageId: `${taskId}-stage`,
+        accountRef,
+        onSession(id) { onSessionIds.push(id); },
+      })),
+    };
+  };
+  const first = makeRun('t-1', 'acc-1');
+  const r1 = await first.promise;
+  assert.equal(r1.status, 'finished', JSON.stringify(r1));
+  assert.equal(first.onSessionIds.length, 1);
+
+  // 第二次与第三次并发执行（即使 attachSession 在第 2 次抛错），均不得因重复注册 shellEnv 或 attachSession 失败而丢失会话
+  const second = makeRun('t-2', 'acc-2');
+  const third = makeRun('t-3', 'acc-3');
+  const [r2, r3] = await Promise.all([second.promise, third.promise]);
+  assert.equal(r2.status, 'finished', JSON.stringify(r2));
+  assert.equal(r3.status, 'finished', JSON.stringify(r3));
+  assert.equal(second.onSessionIds.length, 1);
+  assert.equal(third.onSessionIds.length, 1);
+  assert.equal(new Set([r1.sessionId, r2.sessionId, r3.sessionId]).size, 3);
+  assert.equal(runs.length, 3);
+  assert.equal(attached.length, 2);
+  assert.ok(proxyGets >= 3);
+  assert.equal(effectCleanups.length, 1);
+
+  // cleanup 释放后，重新激活上下文仍能重新注册一次 shellEnv
+  for (const cleanup of effectCleanups.splice(0)) cleanup();
+  assert.equal(rawShellEnv.contributors.size, 0);
+  const fourth = makeRun('t-4', 'acc-4');
+  const r4 = await fourth.promise;
+  assert.equal(r4.status, 'finished');
+  assert.equal(fourth.onSessionIds.length, 1);
+});
+
 async function resolveTestDshEntrypoint() {
   if (process.env.DSH_ENTRYPOINT) return process.env.DSH_ENTRYPOINT;
   try {
@@ -654,12 +770,9 @@ async function resolveTestDshEntrypoint() {
   return undefined;
 }
 
-test('真实 DSH Cordis 运行时仅挂载原生编码工具并通过 bash 子进程注入作用域 CLI 环境', async t => {
+async function bootRealCordisHost(t, { withSessionController = false, onWebSearch } = {}) {
   const entrypoint = await resolveTestDshEntrypoint();
-  if (!entrypoint) {
-    t.skip('未发现 DSH 可执行入口，跳过真实 Cordis 集成测试。');
-    return;
-  }
+  if (!entrypoint) return undefined;
   const previousEntrypoint = process.env.DSH_ENTRYPOINT;
   process.env.DSH_ENTRYPOINT = entrypoint;
   t.after(() => {
@@ -705,6 +818,13 @@ test('真实 DSH Cordis 运行时仅挂载原生编码工具并通过 bash 子�
 
   const ctx = new Context();
   t.after(() => ctx.fiber.dispose());
+  const warnings = [];
+  if (!ctx.logger) ctx.logger = {};
+  const origWarn = ctx.logger.warn?.bind(ctx.logger);
+  ctx.logger.warn = (...args) => {
+    warnings.push(args);
+    origWarn?.(...args);
+  };
 
   const forks = [
     ctx.plugin(unwrap(llmMod)),
@@ -728,6 +848,39 @@ test('真实 DSH Cordis 运行时仅挂载原生编码工具并通过 bash 子�
     ctx.plugin(unwrap(attachmentLocalMod), { root: join(root, 'attachments') }),
   ];
 
+  let workspace;
+  if (withSessionController) {
+    const sharedWorkspace = join(root, 'shared-workspace');
+    await mkdir(sharedWorkspace, { recursive: true });
+    workspace = {
+      id: 'ws-educoder',
+      path: sharedWorkspace,
+      sessionIds: [],
+      async attachSession(id) {
+        if (!this.sessionIds.includes(id)) this.sessionIds.push(id);
+      },
+    };
+    const [sessionQueryMod, typertRegistryMod, sessionControllerMod] = await Promise.all([
+      importHost('@deepseek-ai/dsh-session-query'),
+      importHost('@deepseek-ai/dsh-typert-registry'),
+      importHost('@deepseek-ai/dsh-api-session-controller'),
+    ]);
+    ctx.provide('workspaceRegistry', {
+      archivedSessionIds: [],
+      list: () => [workspace],
+      get: id => (id === workspace.id ? workspace : undefined),
+    });
+    ctx.provide('remoteAccess', { allows: () => true });
+    ctx.provide('fileUploads', { registerAgentResolver: () => () => {} });
+    ctx.provide('fileReferences', { list: () => [] });
+    ctx.provide('typertGateway', { getPendingRemoteEvents: () => [] });
+    forks.push(
+      ctx.plugin(unwrap(sessionQueryMod)),
+      ctx.plugin(unwrap(typertRegistryMod)),
+      ctx.plugin(unwrap(sessionControllerMod), { nativeOpen: false }),
+    );
+  }
+
   await Promise.all(forks.map(fork => fork.await?.()));
 
   // 注册一个全局无关工具，验证 mountNativeCodingTools + restrict + guard 会将其彻底屏蔽
@@ -736,21 +889,29 @@ test('真实 DSH Cordis 运行时仅挂载原生编码工具并通过 bash 子�
     description: 'Dummy forbidden tool',
     parameters: { q: { type: 'string', required: true } },
     output: { schema: { type: 'object', properties: {} }, render: () => [] },
-    async execute() { throw new Error('forbidden global tool must not execute'); },
+    async execute(args) {
+      if (onWebSearch) return onWebSearch(args);
+      throw new Error('forbidden global tool must not execute');
+    },
   });
 
   const capturedRequests = [];
   let modelTurn = 0;
+  let customStreamHandler;
   class FixtureAdapter extends llmMod.LlmAdapter {
     async *stream(options) {
       capturedRequests.push(options);
       modelTurn++;
-      if (modelTurn === 1) {
+      if (customStreamHandler) {
+        yield* customStreamHandler(options, modelTurn);
+        return;
+      }
+      if (modelTurn % 2 === 1) {
         yield { type: 'block-start', index: 0, blockType: 'tool-call' };
         yield {
           type: 'tool-call-delta',
           index: 0,
-          id: 'call_real_doctor',
+          id: `call_real_doctor_${modelTurn}`,
           name: 'bash',
           argumentsDelta: JSON.stringify({
             description: 'Run EduCoder CLI doctor check',
@@ -769,12 +930,29 @@ test('真实 DSH Cordis 运行时仅挂载原生编码工具并通过 bash 子�
   }
   ctx.llm.registerAdapter(['fixture'], new FixtureAdapter());
 
-  const boundary = installEduCoderToolBoundary(ctx);
-  t.after(boundary.dispose);
+  return {
+    root,
+    ctx,
+    workspace,
+    warnings,
+    capturedRequests,
+    setStreamHandler(handler) { customStreamHandler = handler; },
+    createUserMessage(text) {
+      return { role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } };
+    },
+  };
+}
+
+test('真实 DSH Cordis 运行时仅挂载原生编码工具并通过 bash 子进程注入作用域 CLI 环境', async t => {
+  const host = await bootRealCordisHost(t);
+  if (!host) {
+    t.skip('未发现 DSH 可执行入口，跳过真实 Cordis 集成测试。');
+    return;
+  }
+  const { root, ctx, capturedRequests } = host;
 
   const sharedWorkspace = join(root, 'shared-workspace');
   const runner = createAgentRunner(ctx, {
-    toolBoundary: boundary,
     workspaceRoot: root,
     sharedWorkspaceRoot: sharedWorkspace,
     apiUrl: 'http://127.0.0.1:9299',
@@ -797,8 +975,31 @@ test('真实 DSH Cordis 运行时仅挂载原生编码工具并通过 bash 子�
   });
 
   assert.equal(result.status, 'finished', `unexpected outcome: ${JSON.stringify(result)}`);
+  assert.ok(result.sessionId, 'first real Cordis run must report sessionId');
   assert.equal(result.steps, 2);
   assert.equal(capturedRequests.length, 2);
+
+  // 在同一个 Cordis 运行时中继续执行第二个新任务：必须正常创建独立会话并注入该任务的隔离 CLI 环境，不能重复注册 educoder-cli-env
+  const secondSecret = 'sess-cordis-top-secret-222';
+  const secondSessionIds = [];
+  const secondResult = await runner({
+    accountRef: 'real-acc-2',
+    courseId: 'course-1',
+    homeworkId: 'hw-1',
+    taskId: 'game-2',
+    stageId: 'stage-2',
+    title: 'Second Real Cordis Task',
+    instructions: '请使用 $DSH_EDUCODER_CLI 完成第二题。',
+    paths: ['src/main.py'],
+    session: { remoteUserId: 8, session: secondSecret, autologin: 'auto-2', zzud: 'real-acc-2' },
+    onSession(id) { secondSessionIds.push(id); },
+  });
+  assert.equal(secondResult.status, 'finished', `second real Cordis run failed: ${JSON.stringify(secondResult)}`);
+  assert.ok(secondResult.sessionId, 'second real Cordis run must report sessionId');
+  assert.notEqual(secondResult.sessionId, result.sessionId);
+  assert.deepEqual(secondSessionIds, [secondResult.sessionId]);
+  assert.equal(secondResult.steps, 2);
+  assert.equal(capturedRequests.length, 4);
 
   // 验证模型看到的工具与提示词完全仅含原生工具，无任何 educoder_* 或 web_search/plan/subagent/goal/skill 泄漏
   const firstReq = capturedRequests[0];
@@ -813,14 +1014,178 @@ test('真实 DSH Cordis 运行时仅挂载原生编码工具并通过 bash 子�
   assert.ok(!toolNames.includes('web_search'));
 
   const systemText = JSON.stringify(firstReq.system ?? '');
-  for (const forbidden of ['educoder_read_file', 'educoder_save_file', 'educoder_evaluate', 'exit_plan_mode', 'web_search', 'todo_write', sessionSecret]) {
+  for (const forbidden of ['educoder_read_file', 'educoder_save_file', 'educoder_evaluate', 'exit_plan_mode', 'web_search', 'todo_write', sessionSecret, secondSecret]) {
     assert.ok(!systemText.includes(forbidden), `system prompt leaked ${forbidden}`);
   }
 
   // 验证 bash 工具真正在隔离环境里执行了 node "$DSH_EDUCODER_CLI" doctor 且 session secret 未进 stdout 或父进程 env
   assert.equal(process.env.DSH_EDUCODER_SESSION, undefined);
-  const secondTranscript = JSON.stringify(capturedRequests[1].messages ?? []);
-  assert.ok(secondTranscript.includes('"ok": true') || secondTranscript.includes('cliRoot'), 'doctor output missing from tool result');
-  assert.ok(secondTranscript.includes('HAS_SCOPED_ENV=yes'));
-  assert.ok(!secondTranscript.includes(sessionSecret), 'session secret must never appear in model transcript');
+  for (const [reqIndex, forbiddenSecret] of [[1, sessionSecret], [3, secondSecret]]) {
+    const transcript = JSON.stringify(capturedRequests[reqIndex].messages ?? []);
+    assert.ok(transcript.includes('"ok": true') || transcript.includes('cliRoot'), 'doctor output missing from tool result');
+    assert.ok(transcript.includes('HAS_SCOPED_ENV=yes'));
+    assert.ok(!transcript.includes(forbiddenSecret), 'session secret must never appear in model transcript');
+  }
+});
+
+test('挂载 SessionController 时走正常常驻会话流程：结束后不注销会话、可复用且清理回合隔离与凭据', async t => {
+  const webSearchCalls = [];
+  const host = await bootRealCordisHost(t, {
+    withSessionController: true,
+    onWebSearch(args) {
+      webSearchCalls.push(args);
+      return { ok: true, q: args.q };
+    },
+  });
+  if (!host) {
+    t.skip('未发现 DSH 可执行入口，跳过 SessionController 集成测试。');
+    return;
+  }
+
+  const { ctx, workspace, capturedRequests, setStreamHandler, createUserMessage } = host;
+  const disposedSessions = [];
+  const removedApiSessions = [];
+  const addedApiSessions = [];
+  ctx.on('session/disposed', session => { disposedSessions.push(String(session.id)); });
+  ctx.on('api-session/removed', sessionId => { removedApiSessions.push(String(sessionId)); });
+  ctx.on('api-session/added', summary => { addedApiSessions.push(String(summary.sessionId)); });
+
+  const sharedWorkspace = workspace.path;
+  const firstSecret = 'sess-sc-secret-111';
+  const secondSecret = 'sess-sc-secret-222';
+  const experience = Promise.resolve({
+    root: sharedWorkspace,
+    workspace,
+    read: async () => '',
+    attachSession: id => workspace.attachSession(id),
+  });
+
+  const runner = createAgentRunner(ctx, {
+    workspaceRoot: host.root,
+    sharedWorkspaceRoot: sharedWorkspace,
+    experience,
+    apiUrl: 'http://127.0.0.1:9299',
+    provider: 'fixture',
+    model: 'code-custom',
+    maxTokens: 1234,
+    maxSteps: 4,
+    maxTotalTokens: 10_000,
+    timeoutMs: 15_000,
+    extended: true,
+  });
+
+  const taskBase = {
+    accountRef: 'sc-acc',
+    courseId: 'course-1',
+    homeworkId: 'hw-1',
+    taskId: 'game-1',
+    stageId: 'stage-1',
+    title: 'SessionController Task',
+    instructions: '请使用 CLI 完成第 1 关。',
+    paths: ['src/main.py'],
+  };
+
+  const first = await runner({
+    ...taskBase,
+    session: { remoteUserId: 1, session: firstSecret, autologin: 'auto-1', zzud: 'sc-acc' },
+  });
+
+  assert.equal(first.status, 'finished', `unexpected first result: ${JSON.stringify(first)} warnings=${JSON.stringify(host.warnings)}`);
+  assert.ok(first.sessionId);
+  assert.ok(first.sessionResume, 'must emit sessionResume');
+  assert.equal(disposedSessions.length, 0, 'session/disposed must not be emitted');
+  assert.equal(removedApiSessions.length, 0, 'api-session/removed must not be emitted');
+  assert.ok(addedApiSessions.includes(first.sessionId), 'api-session/added must include EduCoder session');
+  assert.ok(workspace.sessionIds.includes(first.sessionId), 'session must remain attached to workspace');
+
+  const liveAgent = ctx.agents.get(first.sessionId);
+  assert.ok(liveAgent, 'agent must stay resident in ctx.agents');
+  assert.equal(liveAgent.status, 'idle');
+
+  assert.equal(capturedRequests[0].model, 'code-custom');
+  assert.equal(capturedRequests[0].maxTokens, 1234);
+  const firstToolNames = (capturedRequests[0].tools ?? []).map(tool => tool.name);
+  assert.ok(!firstToolNames.includes('web_search'), 'web_search must be hidden during EduCoder turn');
+
+  // 常驻 idle 会话不应阻止 createSaveEvidenceReader 读取崩溃保存证据，仅 running 时跳过
+  const sessionDigest = createHash('sha256').update(String(first.sessionId)).digest('hex').slice(0, 32);
+  const mappedWorkdir = JSON.parse(await readFile(
+    join(sharedWorkspace, 'tasks', '.sessions', `${sessionDigest}.json`),
+    'utf8',
+  )).workdir;
+  await writeCliState({ workdir: mappedWorkdir }, {
+    pendingSave: { path: 'src/main.py', content: 'print("saved")\n' },
+  });
+  const readEvidence = createSaveEvidenceReader(ctx, { sharedWorkspaceRoot: sharedWorkspace });
+  const recovered = await readEvidence(first.sessionId);
+  assert.deepEqual(recovered, { path: 'src/main.py', content: 'print("saved")\n' });
+
+  // 同一常驻会话进入下一关复用：不能因重复 setExecutor 报错，且注入新凭据、清理旧凭据
+  const second = await runner({
+    ...taskBase,
+    stageId: 'stage-2',
+    instructions: '请继续完成第 2 关。',
+    resumeFromPreviousStage: true,
+    sessionResume: first.sessionResume,
+    session: { remoteUserId: 1, session: secondSecret, autologin: 'auto-2', zzud: 'sc-acc' },
+  });
+
+  assert.equal(second.status, 'finished', `unexpected second result: ${JSON.stringify(second)}`);
+  assert.equal(second.sessionId, first.sessionId, 'second stage must reuse the same resident session');
+  assert.equal(ctx.agents.get(first.sessionId), liveAgent);
+  assert.equal(disposedSessions.length, 0);
+  assert.equal(removedApiSessions.length, 0);
+
+  const stage2Transcript = JSON.stringify(capturedRequests[3].messages ?? []);
+  assert.ok(!stage2Transcript.includes(firstSecret));
+  assert.ok(!stage2Transcript.includes(secondSecret));
+
+  // 回合结束后清理了 tools.restrict/guard、shellEnv 凭据与 agent/pre-step：用户可在同一会话内正常继续对话并调用 web_search
+  let userTurnStep = 0;
+  setStreamHandler(async function* () {
+    userTurnStep++;
+    if (userTurnStep === 1) {
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' };
+      yield {
+        type: 'tool-call-delta',
+        index: 0,
+        id: 'call_user_bash_clean_env',
+        name: 'bash',
+        argumentsDelta: JSON.stringify({
+          description: 'Check cleared EduCoder env after turn',
+          command: 'test -z "$DSH_EDUCODER_SESSION" && test -z "$DSH_EDUCODER_TARGET" && echo CLEAN_ENV=yes',
+        }),
+      };
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } };
+      yield { type: 'finish', reason: { kind: 'tool-use' } };
+      return;
+    }
+    if (userTurnStep === 2) {
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' };
+      yield {
+        type: 'tool-call-delta',
+        index: 0,
+        id: 'call_user_web_search',
+        name: 'web_search',
+        argumentsDelta: JSON.stringify({ q: 'hello-after-educoder' }),
+      };
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } };
+      yield { type: 'finish', reason: { kind: 'tool-use' } };
+      return;
+    }
+    yield { type: 'block-start', index: 0, blockType: 'text' };
+    yield { type: 'text-delta', index: 0, text: 'User turn completed.' };
+    yield { type: 'usage', usage: { inputTokens: 15, outputTokens: 5 } };
+    yield { type: 'finish', reason: { kind: 'stop' } };
+  });
+
+  liveAgent.followup(createUserMessage('continue after educoder'));
+  await liveAgent.whenIdle();
+
+  assert.equal(webSearchCalls.length, 1, 'user follow-up turn must be able to run previously hidden/guarded tools');
+  assert.deepEqual(webSearchCalls[0], { q: 'hello-after-educoder' });
+  const userReqToolNames = (capturedRequests[4].tools ?? []).map(tool => tool.name);
+  assert.ok(userReqToolNames.includes('web_search'), 'web_search restriction must be cleaned up after EduCoder turn');
+  const userTranscript = JSON.stringify(capturedRequests.at(-1).messages ?? []);
+  assert.ok(userTranscript.includes('CLEAN_ENV=yes'), 'EduCoder shellEnv secrets must be purged after turn');
 });

@@ -1,6 +1,6 @@
 # DSH Toolkit & EduCoder · Linux 服务器版
 
-本仓库是 [blueforst/dsh-toolkit](https://github.com/blueforst/dsh-toolkit) 的独立派生项目，保留上游提交历史、许可证和原 Toolkit 软件包，并在此基础上新增 **`@forst/dsh-educoder`（当前 `0.2.2`）** 可选插件及隔离部署方案，提供头歌（EduCoder）多账号隔离、课程和作业选择、持久化任务队列以及基于 DSH 原生编码工具与工作区可自愈 CLI（`./cli/educoder.mjs`）的评测工作流。详细功能见 [EduCoder 插件说明](plugins/educoder/README.md)，安装与隔离验收见 [EduCoder 开发与公网部署](deploy/educoder/README.md)。
+本仓库是 [blueforst/dsh-toolkit](https://github.com/blueforst/dsh-toolkit) 的独立派生项目，保留上游提交历史、许可证和原 Toolkit 软件包，并在此基础上新增 **`@forst/dsh-educoder`（当前 `0.2.9`）** 可选插件及隔离部署方案，提供头歌（EduCoder）多账号隔离、课程和作业选择、持久化任务队列以及基于 DSH 原生 `SessionController` 会话流程、原生编码工具与工作区可自愈 CLI（`./cli/educoder.mjs`）的评测工作流。详细功能见 [EduCoder 插件说明](plugins/educoder/README.md)，安装与隔离验收见 [EduCoder 开发与公网部署](deploy/educoder/README.md)。
 
 原 Toolkit 面向 Linux 服务器的 DSH 插件包：**服务器资源、OpenCode Go 月额度、Pi 会话费用**。另附 **Camoufox 指纹浏览器运行时**、**Linux 完整桌面与 Computer Use**及 **OpenCode Go 模型配置示例**。
 
@@ -16,17 +16,17 @@ Linux 桌面新增配方及真实截图坐标验收见 [桌面说明](integratio
 
 ## EduCoder 扩展（`@forst/dsh-educoder`）
 
-- **多账号隔离与控制面**：每个头歌账号独立保存会话、工作目录与 SQLite 调度状态；支持课程/作业浏览、单项分配及课程「一键通关」。
-- **原生工具 + 内存作用域 CLI 隔离**：作业会话仅挂载 DSH 原生编码工具（`bash`/`pwsh`、`read`、`read_image`、`write`、`edit`、`glob`、`grep`、`job_output`/`job_list`/`job_kill`），不注入 `educoder_*` 专属 tool schema，也不挂载 `plan-mode`/`subagent`/`schedule`/`goal`/`skill`/`web_search`/`todo_write`。每个运行中的 Agent 仅在内存 `ctx.shellEnv` 临时获得当前任务的 `DSH_EDUCODER_*` 环境变量并运行在 `workspace-write` + `never` 沙箱审批策略下，任务结束后立即撤销。
+- **多账号隔离与控制面**：每个头歌账号独立保存会话、工作目录与 SQLite 调度状态；支持课程/作业浏览、单项分配及课程「一键通关」（已通过与已提交客观题「待评审」均计入完成进度并自动跳过），任务队列默认按更新时间倒序展示与切换排序。
+- **常驻 `SessionController` 会话与按回合工具隔离**：作业会话直接走 DSH 原生 `SessionController` 常驻会话流程并挂载在「EduCoder」共享工作区，完成后保持 `idle` 留在会话栏可供随时跟进对话；插件不向 DSH 宿主挂载全局 `tools.guard` 守卫，正常用户会话保持完整原生能力，仅在 EduCoder 作业单轮执行期间通过 `agentCtx.tools` 限定为原生编码工具（`bash`/`pwsh`、`read`、`read_image`、`write`、`edit`、`glob`、`grep`、`job_output`/`job_list`/`job_kill`），不注入 `educoder_*` 专属 tool schema，也不挂载 `plan-mode`/`subagent`/`schedule`/`goal`/`skill`/`web_search`/`todo_write`。每个运行中的 Agent 仅在内存 `ctx.shellEnv` 临时获得当前任务的 `DSH_EDUCODER_*` 环境变量并运行在 `workspace-write` + `never` 沙箱审批策略下，回合结束后立即撤销。
 - **工作区可自愈 EduCoder CLI（`./cli/educoder.mjs`）**：`inspect`、`read-file`、`save-file`、`evaluate`、`submit-choices`、`terminal`、`browser`、`images`、`doctor`、`cli-diff`、`cli-restore` 全部下沉到共享工作区 `./cli/`；插件随附 `./cli/.baseline/` 基线快照，支持 Agent 在遇到平台差异时直接通过原生 `read`/`edit`/`bash` 诊断或修复 `./cli/`，并在插件升级时自动保留已修改的源码，同时升级未改动的基线文件。
-- **自动评测与读图链路**：支持代码、单选、多选、判断、填空及已配置执行器的 WebSSH 终端关卡；题干附带图片时优先通过原生图片附件传递前 16 张可用图片（超出数量或缺失时可配合 `images --download` / `browser --screenshot` + 原生 `read_image` 查看），评测结果不明或短窗口内尚未收敛时自动读回核验。
+- **自动评测与读图链路**：支持代码、单选、多选、判断、填空及已配置执行器的 WebSSH 终端关卡；未公开评分结果的客观题提交后收口为「待评审」（`pending_review`）并计入课程完成度；题干附带图片时优先通过原生图片附件传递前 16 张可用图片（超出数量或缺失时可配合 `images --download` / `browser --screenshot` + 原生 `read_image` 查看），评测结果不明或短窗口内尚未收敛时自动结合 `.educoder-cli-state.json` 保存证据读回核验。
 - **隔离与转发配套**：提供 [凭据隔离边界](deploy/educoder/凭据隔离.md)、[OpenCode Go 模型转发](deploy/educoder/go-model-relay/README.md)、[OpenCode Go 额度转发](deploy/educoder/go-quota-relay/README.md) 与 [EduCoder 私网连接转发](deploy/educoder/educoder-connect/README.md)。
 
 安装与升级 `@forst/dsh-educoder`（独立于 `@forst/dsh-toolkit` 安装到同一 `web` profile）：
 
 ```bash
 npm pack ./plugins/educoder --pack-destination dist
-dsh plugin --profile web add --ignore-scripts --save-exact "$PWD/dist/forst-dsh-educoder-0.2.2.tgz"
+dsh plugin --profile web add --ignore-scripts --save-exact "$PWD/dist/forst-dsh-educoder-0.2.9.tgz"
 ```
 
 ## 包含什么

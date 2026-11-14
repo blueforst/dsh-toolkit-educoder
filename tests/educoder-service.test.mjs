@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createService } from '../plugins/educoder/service.js';
 
 const people = [
@@ -10,7 +11,7 @@ const people = [
   { login: 'fixture-second-person', password: 'never-store-password-b', remoteId: '202', courseId: 'course-b', homeworkId: '22' },
 ];
 
-function setup(t, { allowAccounts = true, allowTasks = true, mode = 'disabled', assignments } = {}) {
+function setup(t, { allowAccounts = true, allowTasks = true, mode = 'disabled', assignments, inspectTask, runAgent, extended = false } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-educoder-service-')));
   const stored = new Map();
   const state = new Map();
@@ -44,15 +45,17 @@ function setup(t, { allowAccounts = true, allowTasks = true, mode = 'disabled', 
       assert.equal(id, person.courseId);
       return assignments?.get(id) ?? [{ id: person.homeworkId, title: '作业 ' + person.homeworkId, private: session.session }];
     },
-    async inspect(session, { courseId, homeworkId }) {
+    async inspect(session, targetScope) {
+      const { courseId, homeworkId } = targetScope.binding ?? targetScope;
       const person = people.find(item => item.remoteId === session.remoteUserId);
       assert.equal(courseId, person.courseId);
       inspected.push({ courseId, homeworkId });
+      const extra = inspectTask ? await inspectTask({ courseId, homeworkId, targetScope }) : {};
       return { binding: {
         courseId, homeworkId, remoteUserId: session.remoteUserId,
         taskId: 'task-' + homeworkId, practiceId: 'practice-' + homeworkId,
         gameId: homeworkId, challengeId: homeworkId,
-      }, kind: 'manual', state: 'pending' };
+      }, kind: 'manual', state: 'pending', title: '题目 ' + homeworkId, instructions: '题面 ' + homeworkId, ...extra };
     },
   };
   const credentials = {
@@ -64,8 +67,8 @@ function setup(t, { allowAccounts = true, allowTasks = true, mode = 'disabled', 
   };
   let service;
   const open = () => createService({
-    root, credentials, transport, allowAccounts, allowTasks, mode,
-    runAgent: async () => assert.fail('此用例不应启动 Agent'),
+    root, credentials, transport, allowAccounts, allowTasks, mode, extended,
+    runAgent: runAgent ?? (async () => assert.fail('此用例不应启动 Agent')),
   });
   service = open();
   t.after(async () => {
@@ -219,4 +222,125 @@ test('课程通关支持超过一百份作业，并在全部校验成功后才�
   assert.equal(result.started, 101);
   assert.equal(result.tasks.length, 101);
   assert.deepEqual(result.tasks.map(task => task.homeworkId), homeworks.map(task => task.id));
+});
+
+test('tasks 接口默认按更新时间倒序返回队列任务', async t => {
+  const owner = people[0];
+  const homeworks = [
+    { id: '11', title: '作业 11' },
+    { id: '12', title: '作业 12' },
+    { id: '13', title: '作业 13' },
+  ];
+  const { api } = setup(t, { assignments: new Map([[owner.courseId, homeworks]]) });
+  const account = await bind(api, owner);
+  const [first] = await api('allocate', {
+    targets: [{ accountId: account.id, courseId: owner.courseId, homeworkId: '11' }],
+    start: false,
+  });
+  await delay(5);
+  const [second] = await api('allocate', {
+    targets: [{ accountId: account.id, courseId: owner.courseId, homeworkId: '12' }],
+    start: false,
+  });
+  await delay(5);
+  const [third] = await api('allocate', {
+    targets: [{ accountId: account.id, courseId: owner.courseId, homeworkId: '13' }],
+    start: false,
+  });
+  assert.deepEqual((await api('tasks')).map(task => task.id), [third.id, second.id, first.id]);
+
+  await delay(5);
+  await api('control', { taskIds: [first.id], command: 'start' });
+  assert.deepEqual((await api('tasks')).map(task => task.id), [first.id, third.id, second.id]);
+});
+
+test('一键通关会重启队列中已暂停的任务，将待评审任务计入已完成跳过，并保留人工处理任务', async t => {
+  const owner = people[0];
+  const homeworks = [
+    { id: '11', title: '暂停作业' },
+    { id: '12', title: '待评审客观题' },
+    { id: '13', title: '人工作业' },
+  ];
+  const markers = new Map([['11', '0'], ['12', '8']]);
+  let holdPaused;
+  let passedPaused = false;
+  let reviewRuns = 0;
+  const { api } = setup(t, {
+    extended: true,
+    assignments: new Map([[owner.courseId, homeworks]]),
+    inspectTask: ({ homeworkId }) => {
+      if (homeworkId === '11') {
+        return passedPaused
+          ? { kind: 'code', state: 'passed', marker: markers.get('11'), paths: ['main.py'] }
+          : { kind: 'code', state: 'pending', marker: markers.get('11'), paths: ['main.py'] };
+      }
+      if (homeworkId === '12') {
+        return {
+          kind: 'choice',
+          state: 'pending',
+          choiceResultHidden: true,
+          marker: markers.get('12'),
+          questions: [{ type: 'single', prompt: 'q1', options: [{ id: 'A', text: '1' }, { id: 'B', text: '2' }] }],
+        };
+      }
+      return { kind: 'manual', state: 'pending' };
+    },
+    runAgent: async run => {
+      await run.onSession('sess-' + run.homeworkId);
+      if (run.homeworkId === '11') {
+        if (!holdPaused) {
+          if (run.signal.aborted) throw run.signal.reason;
+          return new Promise((_, reject) => run.signal.addEventListener('abort', () => reject(run.signal.reason), { once: true }));
+        }
+        markers.set('11', '1');
+        passedPaused = true;
+        return { status: 'finished' };
+      }
+      if (run.homeworkId === '12') {
+        reviewRuns++;
+        markers.set('12', '9');
+        return { status: 'finished' };
+      }
+      return { status: 'finished' };
+    },
+  });
+
+  const account = await bind(api, owner);
+  const selected = { accountId: account.id, courseId: owner.courseId };
+  const initial = await api('allocate', {
+    targets: [
+      { ...selected, homeworkId: '11' },
+      { ...selected, homeworkId: '12' },
+      { ...selected, homeworkId: '13' },
+    ],
+    start: true,
+  });
+  const waitStatus = async (id, expected) => {
+    let last;
+    for (let i = 0; i < 80; i++) {
+      last = await api('task', { taskId: id });
+      if (last.status === expected) return last;
+      await delay(10);
+    }
+    assert.fail(`等待任务 ${id} 变为 ${expected} 超时，当前为 ${JSON.stringify({ status: last?.status, code: last?.code, events: last?.events })}`);
+  };
+
+  await waitStatus(initial[0].id, 'running');
+  await api('control', { taskIds: [initial[0].id], command: 'pause' });
+  await waitStatus(initial[0].id, 'paused');
+  await waitStatus(initial[1].id, 'pending_review');
+  await waitStatus(initial[2].id, 'manual');
+
+  holdPaused = true;
+  const restarted = await api('startCourse', selected);
+  assert.deepEqual({ ...restarted, tasks: restarted.tasks.map(task => task.homeworkId) }, {
+    started: 1, skippedCompleted: 1, skippedExisting: 1, tasks: ['11'],
+  });
+  await waitStatus(initial[0].id, 'passed');
+  assert.equal((await api('task', { taskId: initial[1].id })).status, 'pending_review');
+  assert.equal((await api('task', { taskId: initial[2].id })).status, 'manual');
+  assert.equal(reviewRuns, 1);
+
+  const afterPass = await api('startCourse', selected);
+  assert.deepEqual(afterPass, { tasks: [], started: 0, skippedCompleted: 2, skippedExisting: 1 });
 });

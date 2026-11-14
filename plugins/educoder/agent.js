@@ -32,6 +32,12 @@ const RESULT_CODES = {
   finished: 'agent_finished',
 };
 class SessionCannotBeReused extends Error {}
+const RECOVERABLE_SESSION_CODES = new Set([
+  'session/not-found',
+  'session/writer-held',
+  'session/subagent-owned',
+]);
+const CONFIGURED_AGENTS = new WeakSet();
 
 const DSH_EDUCODER_ENV_VARS = Object.freeze({
   DSH_EDUCODER_CLI: { description: 'Path to the editable EduCoder CLI entrypoint (educoder.mjs).' },
@@ -52,7 +58,18 @@ const DSH_EDUCODER_ENV_VARS = Object.freeze({
   DSH_EDUCODER_CHROMIUM_PATH: { description: 'Optional Chromium executable path for EduCoder browser checks.' },
 });
 
+const CORDIS_ORIGINAL = Symbol.for('cordis.original');
 const SHELL_ENV_STORES = new WeakMap();
+
+function unwrapCordisService(value) {
+  let current = value;
+  const seen = new Set();
+  while (current && typeof current === 'object' && current[CORDIS_ORIGINAL] && !seen.has(current)) {
+    seen.add(current);
+    current = current[CORDIS_ORIGINAL];
+  }
+  return current;
+}
 
 // 与 Toolkit 的计费插件一样，从正在运行的 DSH CLI 加载同一份 Host SDK。
 async function loadDshRuntime(entrypoint = process.env.DSH_ENTRYPOINT || process.argv[1]) {
@@ -174,6 +191,19 @@ async function mountNativeCodingTools(agentCtx, sdk, agent) {
   await Promise.all(forks.map(fork => fork?.await?.()));
 }
 
+async function ensureAgentNativeTools(agentCtx, sdk, agent) {
+  if (CONFIGURED_AGENTS.has(agent)) return;
+  await mountNativeCodingTools(agentCtx, sdk, agent);
+  agentCtx.tools.setExecutor(sdk.nativeExecutor(agentCtx));
+  CONFIGURED_AGENTS.add(agent);
+}
+
+async function resolveControllerAgent(sessionController, sessionId) {
+  const result = await sessionController.resolveAgent(sessionId);
+  if (result && 'error' in result) throw result.error;
+  return result?.agent ?? result;
+}
+
 function resolveOptionalDshModule(specifier, overrideEnv) {
   try {
     return resolveDshModule(specifier, overrideEnv);
@@ -195,7 +225,10 @@ function compactStringRecord(entries) {
 function ensureShellEnvStore(ctx) {
   const shellEnv = ctx.get?.('shellEnv', false) ?? ctx.shellEnv;
   if (!shellEnv || typeof shellEnv.register !== 'function') return undefined;
-  let store = SHELL_ENV_STORES.get(shellEnv);
+  // Cordis ctx.get('shellEnv', false) returns a fresh Proxy wrapper on every lookup;
+  // key by the unwrapped service instance so repeat runs share the single registration.
+  const target = unwrapCordisService(shellEnv);
+  let store = SHELL_ENV_STORES.get(target);
   if (store) return store;
   const agentEnvs = new WeakMap();
   const unregister = shellEnv.register({
@@ -207,11 +240,13 @@ function ensureShellEnvStore(ctx) {
     },
   });
   store = { agentEnvs };
-  SHELL_ENV_STORES.set(shellEnv, store);
+  SHELL_ENV_STORES.set(target, store);
   if (typeof ctx.effect === 'function') {
     ctx.effect(() => () => {
+      if (SHELL_ENV_STORES.get(target) === store) {
+        SHELL_ENV_STORES.delete(target);
+      }
       unregister?.();
-      SHELL_ENV_STORES.delete(shellEnv);
     });
   }
   return store;
@@ -310,24 +345,6 @@ function measuredTokens(usage) {
     : undefined;
 }
 
-/**
- * 专用 DSH 实例的全局工具边界。只授权本插件正在运行的 Agent 实例，
- * 身份校验不依赖 Session ID 或模型参数。宿主仍须独立限制 Web 和文件访问。
- */
-export function installEduCoderToolBoundary(ctx) {
-  const agents = new WeakMap();
-  const dispose = ctx.tools.guard(exec => !exec.parent && agents.get(exec.agent)?.has(exec.name)
-    ? undefined : '此专用实例只运行已选 EduCoder 关卡的工具。');
-  return {
-    authorize(agent, names) {
-      if (agents.has(agent)) throw new Error('EduCoder Agent already authorized');
-      agents.set(agent, new Set(names));
-      return () => agents.delete(agent);
-    },
-    dispose,
-  };
-}
-
 export function createSaveEvidenceReader(ctx, optionsOrLoader = loadDshRuntime) {
   const opts = typeof optionsOrLoader === 'function'
     ? { runtimeLoader: optionsOrLoader }
@@ -339,7 +356,7 @@ export function createSaveEvidenceReader(ctx, optionsOrLoader = loadDshRuntime) 
   ];
   let runtime;
   return async (sessionId, signal) => {
-    if (!sessionId || ctx.agents.get(sessionId)) return undefined;
+    if (!sessionId || ctx.agents.get(sessionId)?.status === 'running') return undefined;
     for (const tasksRoot of candidateTasksRoots) {
       const mapped = await readSafeJson(sessionMapFile(tasksRoot, sessionId));
       if (typeof mapped?.workdir === 'string' && isAbsolute(mapped.workdir)) {
@@ -433,7 +450,10 @@ function buildCliPrompt({
         '- 提交代码评测并等待结果：`node "$DSH_EDUCODER_CLI" evaluate [--from "$DSH_EDUCODER_WORKDIR/<file>"]`',
       ] : []),
       ...(task.kind === 'choice' || task.questions?.length ? [
-        '- 提交选择/判断/填空答案：`node "$DSH_EDUCODER_CLI" submit-choices --answers \'<json|csv>\'`',
+        '- 提交选择/判断/填空答案（按 `inspect` 题型与题序传入 JSON 数组，例如 `["A","BC"]`；`single` 只能传 1 个选项字母，`multiple` 传多选字母，`judge` 传 `true`/`false`，`fill` 传字符串数组）：`node "$DSH_EDUCODER_CLI" submit-choices --answers \'["A","BC"]\'`',
+        ...(task.choiceResultHidden ? [
+          '- 注意：当前关卡未公开客观题对错结果，成功执行 `submit-choices` 且无报错后即可总结答案并结束本轮，无需重复提交或盲猜。',
+        ] : []),
       ] : []),
       ...(terminalAllowed ? [
         '- 执行远端关卡终端命令：`node "$DSH_EDUCODER_CLI" terminal -- <command>`（若为纯终端实训，执行完请再运行 `evaluate`）',
@@ -480,7 +500,6 @@ export function createAgentRunner(ctx, {
   maxTokens,
   maxTotalTokens,
   redact = defaultRedact,
-  toolBoundary,
   experience,
   extended = false,
   nativeTools = true,
@@ -520,7 +539,6 @@ export function createAgentRunner(ctx, {
     let lastTurnError;
     let sessionFlushed = false;
     let failureLogged = false;
-    let revokeTools;
     let currentAgent;
     let resumed = false;
     let lastRequestAt;
@@ -548,17 +566,22 @@ export function createAgentRunner(ctx, {
     function stop(status) {
       outcome ??= status;
       controller.abort(new Error(RESULT_CODES[status]));
-      handle?.agent.cancel({ kind: 'hook', reason: RESULT_CODES[status] });
+      currentAgent?.cancel({ kind: 'hook', reason: RESULT_CODES[status] });
     }
     const timer = deadlineMs === undefined ? undefined : setTimeout(() => stop('timeout'), deadlineMs);
     const abort = () => stop('cancelled');
     task.signal?.addEventListener('abort', abort, { once: true });
     if (task.signal?.aborted) abort();
     const signal = controller.signal;
-    const shellEnvStore = ensureShellEnvStore(ctx);
+    const cleanups = [];
+    const trackCleanup = disposer => {
+      if (typeof disposer === 'function') cleanups.push(disposer);
+    };
+    let shellEnvStore;
 
     try {
       signal.throwIfAborted();
+      shellEnvStore = ensureShellEnvStore(ctx);
       const paths = allowedPaths(task.paths ?? []);
       const selection = model ? { provider, model } : ctx.agentDefaultModel.currentSelection();
       const shared = await experience;
@@ -625,93 +648,122 @@ export function createAgentRunner(ctx, {
       const candidate = task.sessionResume;
       const age = Date.now() - candidate?.lastRequestAt;
       const archived = id => ctx.workspaceRegistry?.archivedSessionIds.includes(id);
+      const rawController = ctx.get?.('sessionController', false);
+      const sessionController = rawController &&
+        typeof rawController.create === 'function' &&
+        typeof rawController.resolveAgent === 'function'
+        ? rawController
+        : undefined;
+      function assertReusableAgent(agent, previousId) {
+        const { cwd } = agent.session.header;
+        const current = agent.model.current();
+        if (archived(previousId)) throw new SessionCannotBeReused('archived');
+        if (agent.status !== undefined && agent.status !== 'idle') {
+          throw new SessionCannotBeReused('agent_busy');
+        }
+        if (!cwd || cwd !== cwdCanonical) throw new SessionCannotBeReused('cwd_mismatch');
+        const workspaceSessions = shared?.workspace?.sessionIds;
+        if (Array.isArray(workspaceSessions) && !workspaceSessions.includes(previousId)) {
+          throw new SessionCannotBeReused('workspace_missing_session');
+        }
+        if (current?.provider !== selection.provider || current.model !== selection.model ||
+            current.reasoningEffort !== selection.reasoningEffort) {
+          throw new SessionCannotBeReused('model_changed');
+        }
+        if (agent.inbox.nextTurn.length || agent.inbox.nextStep.length) {
+          throw new SessionCannotBeReused('inbox_pending');
+        }
+      }
+      async function prepareTurn(agentCtx, agent, { includeMaxTokens = false } = {}) {
+        currentAgent = agent;
+        shellEnvStore?.agentEnvs.set(agent, cliEnv);
+        await ensureAgentNativeTools(agentCtx, sdk, agent);
+        const view = agentCtx.tools.view?.(agent);
+        if (view?.restrictableNames) {
+          const disallowed = [...view.restrictableNames].filter(name => !allowedTools.has(name));
+          if (disallowed.length > 0) {
+            trackCleanup(agentCtx.tools.restrict({ deny: disallowed }));
+          }
+        } else if (typeof agentCtx.tools.restrict === 'function') {
+          trackCleanup(agentCtx.tools.restrict({ allow: NATIVE_CODING_TOOLS }));
+        }
+        trackCleanup(agentCtx.tools.guard(exec => {
+          if (exec.agent === agent && !exec.parent && allowedTools.has(exec.name)) return;
+          return '此工具仅供当前 EduCoder 关卡会话使用。';
+        }));
+        trackCleanup(agentCtx.on('agent/pre-step', async (_request, next) => {
+          if (signal.aborted ||
+              (stepLimit !== undefined && steps >= stepLimit) ||
+              (totalLimit !== undefined && tokens >= totalLimit)) {
+            outcome ??= 'budget';
+            return { kind: 'reject' };
+          }
+          return next();
+        }, { prepend: true }));
+        if (includeMaxTokens && requestedMaxTokens !== undefined) {
+          trackCleanup(agentCtx.on('agent/request', async (_request, next) => {
+            const base = await next();
+            const maxTokens = base.maxTokens !== undefined
+              ? Math.min(base.maxTokens, requestedMaxTokens)
+              : requestedMaxTokens;
+            return { ...base, maxTokens };
+          }, { prepend: true }));
+        }
+        trackCleanup(agentCtx.on('agent/request-error', async event => {
+          if (event?.error) lastTurnError = event.error;
+          return undefined;
+        }, { prepend: true }));
+        trackCleanup(agentCtx.on('session/event', (session, event) => {
+          if (session !== agent.session) return;
+          if (event.type === 'step/start') steps++;
+          if (event.type === 'assistant/message') {
+            lastRequestAt = Date.now();
+            const count = measuredTokens(event.data.usage);
+            if (count !== undefined) tokens += count;
+          }
+          if (event.type === 'turn/end') {
+            turnReason = event.data.reason?.kind;
+            if (turnReason !== 'completed' && event.data.reason) {
+              lastTurnError ??= event.data.reason.error ?? event.data.reason;
+            }
+          }
+        }));
+      }
       const options = {
         signal,
         agentOptions,
-        async setup(agentCtx, agent) {
-          currentAgent = agent;
-          shellEnvStore?.agentEnvs.set(agent, cliEnv);
-          await mountNativeCodingTools(agentCtx, sdk, agent);
-          revokeTools = toolBoundary?.authorize(agent, allowedTools);
-          const view = agentCtx.tools.view?.(agent);
-          if (view?.restrictableNames) {
-            const disallowed = [...view.restrictableNames].filter(name => !allowedTools.has(name));
-            if (disallowed.length > 0) {
-              agentCtx.tools.restrict({ deny: disallowed });
-            }
-          } else if (typeof agentCtx.tools.restrict === 'function') {
-            agentCtx.tools.restrict({ allow: NATIVE_CODING_TOOLS });
-          }
-          agentCtx.tools.setExecutor(sdk.nativeExecutor(agentCtx));
-          agentCtx.tools.guard(exec => {
-            if (exec.agent === agent && !exec.parent && allowedTools.has(exec.name)) return;
-            return '此工具仅供当前 EduCoder 关卡会话使用。';
-          });
-          agentCtx.on('agent/pre-step', async (_request, next) => {
-            if (signal.aborted ||
-                (stepLimit !== undefined && steps >= stepLimit) ||
-                (totalLimit !== undefined && tokens >= totalLimit)) {
-              outcome ??= 'budget';
-              return { kind: 'reject' };
-            }
-            return next();
-          }, { prepend: true });
-          agentCtx.on('agent/request-error', async event => {
-            if (event?.error) lastTurnError = event.error;
-            return undefined;
-          }, { prepend: true });
-          agentCtx.on('session/event', (session, event) => {
-            if (session !== agent.session) return;
-            if (event.type === 'step/start') steps++;
-            if (event.type === 'assistant/message') {
-              lastRequestAt = Date.now();
-              const count = measuredTokens(event.data.usage);
-              if (count !== undefined) tokens += count;
-            }
-            if (event.type === 'turn/end') {
-              turnReason = event.data.reason?.kind;
-              if (turnReason !== 'completed' && event.data.reason) {
-                lastTurnError ??= event.data.reason.error ?? event.data.reason;
-              }
-            }
-          });
-        },
+        setup: (agentCtx, agent) => prepareTurn(agentCtx, agent),
       };
       let nextSessionId;
       const nextStage = Boolean(extendedMode && task.resumeFromPreviousStage);
       const sameContext = nextStage ? candidate?.scopeKey === scopeKey : candidate?.key === resumeKey;
       if (sameContext && age >= 0 && age < SESSION_REUSE_MS) {
         const previousId = sdk.sessionId(candidate.sessionId);
-        if (!archived(previousId) && !ctx.agents.get(previousId)) {
+        if (!archived(previousId) && (sessionController || !ctx.agents.get(previousId))) {
           try {
-            handle = await ctx.agents.withoutInitiator(() => ctx.agents.resume({
-              ...options,
-              resumeSessionId: previousId,
-              async setup(agentCtx, agent) {
-                const { cwd } = agent.session.header;
-                const current = agent.model.current();
-                if (archived(previousId)) throw new SessionCannotBeReused('archived');
-                if (!cwd || cwd !== cwdCanonical) throw new SessionCannotBeReused('cwd_mismatch');
-                if (shared && !shared.workspace.sessionIds.includes(previousId)) {
-                  throw new SessionCannotBeReused('workspace_missing_session');
-                }
-                if (current?.provider !== selection.provider || current.model !== selection.model ||
-                    current.reasoningEffort !== selection.reasoningEffort) {
-                  throw new SessionCannotBeReused('model_changed');
-                }
-                if (agent.inbox.nextTurn.length || agent.inbox.nextStep.length) {
-                  throw new SessionCannotBeReused('inbox_pending');
-                }
-                await options.setup(agentCtx, agent);
-              },
-            }));
+            if (sessionController) {
+              const agent = await resolveControllerAgent(sessionController, previousId);
+              assertReusableAgent(agent, previousId);
+              currentAgent = agent;
+            } else {
+              handle = await ctx.agents.withoutInitiator(() => ctx.agents.resume({
+                ...options,
+                resumeSessionId: previousId,
+                async setup(agentCtx, agent) {
+                  assertReusableAgent(agent, previousId);
+                  await options.setup(agentCtx, agent);
+                },
+              }));
+              currentAgent = handle.agent;
+            }
             nextSessionId = previousId;
             resumed = true;
             requestCount = candidate.requestCount;
           } catch (error) {
             const missing = sdk.sessionNotFound && error instanceof sdk.sessionNotFound;
             const owned = sdk.sessionOwned && error instanceof sdk.sessionOwned;
-            if (signal.aborted || (!missing && !owned && !(error instanceof SessionCannotBeReused))) throw error;
+            const recoverableRemote = typeof error?.code === 'string' && RECOVERABLE_SESSION_CODES.has(error.code);
+            if (signal.aborted || (!recoverableRemote && !missing && !owned && !(error instanceof SessionCannotBeReused))) throw error;
             ctx.logger?.warn?.('EduCoder 无法复用既有会话，将新建会话。', {
               taskId: task.taskId,
               stageId: task.stageId,
@@ -746,27 +798,62 @@ export function createAgentRunner(ctx, {
           imagesMissing = true;
         }
       }
-      if (!handle) {
+      if (!currentAgent) {
         phase = 'agent_setup_failed';
         nextSessionId = sdk.sessionId(randomUUID());
         signal.throwIfAborted();
-        handle = await ctx.agents.withoutInitiator(() => ctx.agents.create({
-          ...options, sessionId: nextSessionId, meta: { cwd: cwdCanonical },
-        }));
+        if (sessionController) {
+          const created = await sessionController.create({
+            sessionId: nextSessionId,
+            cwd: cwdCanonical,
+          });
+          const createdId = sdk.sessionId(created.sessionId);
+          const agent = await resolveControllerAgent(sessionController, createdId);
+          if (selection?.provider && selection?.model && typeof agent.model?.select === 'function') {
+            const currentModel = agent.model.current?.();
+            if (currentModel?.provider !== selection.provider ||
+                currentModel?.model !== selection.model ||
+                currentModel?.reasoningEffort !== selection.reasoningEffort) {
+              agent.model.select(selection);
+            }
+          }
+          currentAgent = agent;
+          nextSessionId = createdId;
+        } else {
+          handle = await ctx.agents.withoutInitiator(() => ctx.agents.create({
+            ...options, sessionId: nextSessionId, meta: { cwd: cwdCanonical },
+          }));
+          currentAgent = handle.agent;
+        }
       }
       sessionId = String(nextSessionId);
       phase = 'agent_session_failed';
-      await handle.agent.whenIdle();
-      await recordSessionWorkdir(cliInfo.tasksRoot, sessionId, taskWorkdir);
-      if (shared && !resumed) await shared.workspace.attachSession(nextSessionId);
+      await currentAgent.whenIdle();
+      if (shared && !resumed) {
+        try {
+          if (typeof shared.attachSession === 'function') {
+            await shared.attachSession(nextSessionId);
+          } else {
+            await shared.workspace?.attachSession?.(nextSessionId);
+          }
+        } catch (error) {
+          ctx.logger?.warn?.('EduCoder 会话归属工作区失败。', {
+            taskId: task.taskId,
+            stageId: task.stageId,
+            sessionId,
+            error: safeErrorSummary(error, effectiveRedact),
+          });
+        }
+      }
       await task.onSession?.(sessionId);
+      await recordSessionWorkdir(cliInfo.tasksRoot, sessionId, taskWorkdir);
       signal.throwIfAborted();
       if (archived(nextSessionId)) throw new SessionCannotBeReused();
       if (!resumed) {
         const title = redacted(task.title ?? 'EduCoder 关卡', 120, effectiveRedact);
-        handle.agent.session.append('session/title', { title, messageSeqs: [], source: { kind: 'user' } });
-        sdk.setSandboxMode(handle.agent.session, 'workspace-write');
-        sdk.setApprovalPolicy(handle.agent.session, 'never');
+        currentAgent.session.append('session/title', { title, messageSeqs: [], source: { kind: 'user' } });
+        sdk.setSandboxMode(currentAgent.session, 'workspace-write');
+        sdk.setApprovalPolicy(currentAgent.session, 'never');
       }
       const notes = shared && !resumed ? redacted(await shared.read(), 12_000, effectiveRedact) : '';
       const examples = newStatement && task.examples?.map(({ input, expected }) => ({
@@ -787,12 +874,15 @@ export function createAgentRunner(ctx, {
         browserAllowed,
         redact: effectiveRedact,
       });
+      if (sessionController) {
+        await prepareTurn(currentAgent.ctx, currentAgent, { includeMaxTokens: true });
+      }
       phase = 'agent_turn_failed';
-      handle.agent.followup(sdk.userMessage({
+      currentAgent.followup(sdk.userMessage({
         content: [{ type: 'text', text: prompt }, ...imageBlocks],
         source: { kind: 'dsh-educoder' },
       }));
-      await handle.agent.whenIdle();
+      await currentAgent.whenIdle();
       if (turnReason === 'max-tokens' || (totalLimit !== undefined && tokens > totalLimit)) outcome ??= 'budget';
       outcome ??= turnReason === 'completed' ? 'finished' : 'failed';
       if (outcome === 'failed') {
@@ -804,19 +894,33 @@ export function createAgentRunner(ctx, {
         warnFailure(phase, error);
       }
     } finally {
+      while (cleanups.length > 0) {
+        const dispose = cleanups.pop();
+        try {
+          dispose();
+        } catch (error) {
+          ctx.logger?.warn?.('EduCoder 清理回合绑定失败。', {
+            taskId: task.taskId,
+            stageId: task.stageId,
+            sessionId,
+            error: safeErrorSummary(error, effectiveRedact),
+          });
+        }
+      }
       if (currentAgent) shellEnvStore?.agentEnvs.delete(currentAgent);
-      revokeTools?.();
       clearTimeout(timer);
       task.signal?.removeEventListener('abort', abort);
-      if (handle) {
+      if (currentAgent) {
         try {
-          await ctx.sessions.flush(handle.agent.session);
+          await ctx.sessions.flush(currentAgent.session);
           sessionFlushed = true;
         } catch (error) {
           phase = 'agent_session_flush_failed';
           if (outcome === 'finished') outcome = 'failed';
           warnFailure(phase, error);
         }
+      }
+      if (handle) {
         try {
           await handle.dispose();
         } catch (error) {

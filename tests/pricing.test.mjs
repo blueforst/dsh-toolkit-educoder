@@ -32,8 +32,27 @@ test('复用安装的 Pi：分项、重试、去重、压缩和未知价格', { 
   const model = runtime.getBuiltinModels('anthropic').find(item => item.cost.cacheWrite > 0);
   assert(model, '已安装 Pi 应包含有缓存写费用的模型');
   const withWrite = projection.apply(projection.init(), message(1, { ...usage, cacheWriteTokens: 5000 }, { provider: 'anthropic', model: model.id }));
-  assert(withWrite.totals.cacheWriteUsd > 0);
+  assert.equal(withWrite.totals.cacheWriteUsd > 0, true);
   close(withWrite.totals.usd, withWrite.totals.inputUsd + withWrite.totals.outputUsd + withWrite.totals.cacheReadUsd + withWrite.totals.cacheWriteUsd);
+
+  const [major, minor, patch] = runtime.version.split('.').map(part => Number.parseInt(part, 10) || 0);
+  assert.equal(projection.stateVersion, 4_000_000 + major * 10000 + minor * 100 + patch);
+
+  const nativeRelay = projection.apply(projection.init(), message(1, usage, { provider: 'opencode-go-native', model: 'deepseek-v4.1-flash' }));
+  close(nativeRelay.totals.usd, .0003);
+  assert.equal(nativeRelay.totals.pricedCalls, 1);
+  assert.equal(nativeRelay.totals.unpricedCalls, 0);
+
+  const unknownGateway = projection.apply(projection.init(), message(1, usage, { provider: 'custom-gateway', model: 'deepseek-v4.1-flash' }));
+  assert.equal(unknownGateway.totals.usd, 0);
+  assert.equal(unknownGateway.totals.unpricedCalls, 1);
+
+  const vertex = projection.apply(projection.init(), message(1, usage, { provider: 'google-vertex', model: 'gemini-4-hydrogen' }));
+  close(vertex.totals.inputUsd, .0015);
+  close(vertex.totals.outputUsd, .0015);
+  close(vertex.totals.cacheReadUsd, .00075);
+  close(vertex.totals.usd, .00375);
+  assert.equal(vertex.totals.pricedCalls, 1);
 });
 
 test('统一后端注册两条原生 HTTP 路由及费用投影', { skip: !entrypoint && '请设置 DSH_ENTRYPOINT' }, async () => {

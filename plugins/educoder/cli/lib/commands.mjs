@@ -23,7 +23,7 @@ export function helpText() {
     '  save-file [remotePath] --from <localFile>         从本地文件上传保存到 EduCoder 代码区（不触发评测）',
     '  save-file [remotePath] --content <text>|--stdin   直接传入内容保存到 EduCoder 代码区',
     '  evaluate [--no-wait] [--from <localFile>]         提交评测并等待结果（可先 --from 自动 save-file）',
-    '  submit-choices --answers <json|csv> [--from <f>]  按题序提交选择/判断/填空答案',
+    '  submit-choices --answers <json|csv> [--from <f>]  按题序提交选择/判断/填空答案（支持数组或 {"1":"A"} / [{"index":1,"answer":"A"}]）',
     '  terminal [--] <command...>                        在关卡远端终端执行命令（受终端开关限制）',
     '  browser [--screenshot <pngPath>]                  无头 Chromium 查看关卡网页并可截图给 read_image',
     '  images [--download <dir>]                         列出或下载题面附图到目录以供 read_image 查看',
@@ -97,20 +97,90 @@ function resolveRemotePath(explicitPath, task) {
   throw new UsageError(`请指定 remotePath；当前关卡可写路径: ${candidates}`);
 }
 
+function parseQuestionNumber(raw) {
+  if (typeof raw === 'number') {
+    return Number.isInteger(raw) && raw >= 1 ? raw : null;
+  }
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  const match = trimmed.match(/^(?:q|no\.?|#)?\s*(\d+)$/i) || trimmed.match(/^第\s*(\d+)\s*题$/);
+  if (!match) return null;
+  const num = Number.parseInt(match[1], 10);
+  return Number.isSafeInteger(num) && num >= 1 ? num : null;
+}
+
+function normalizeChoiceObjectArray(list) {
+  const indexKeys = ['index', 'question', 'no', 'number', 'id', 'q'];
+  let withIndex = 0;
+  for (const item of list) {
+    if (!Object.hasOwn(item, 'answer')) {
+      throw new UsageError('--answers 对象数组元素缺少 answer 字段，请传入 ["A","BC"] 或 [{"index":1,"answer":"A"}]。');
+    }
+    if (indexKeys.some(key => Object.hasOwn(item, key))) withIndex += 1;
+  }
+  if (withIndex === 0) return list.map(item => item.answer);
+  if (withIndex !== list.length) {
+    throw new UsageError('--answers 对象数组不可混用带题号与不带题号的元素。');
+  }
+  const ordered = new Array(list.length);
+  const seen = new Set();
+  for (const item of list) {
+    const key = indexKeys.find(candidate => Object.hasOwn(item, candidate));
+    const num = parseQuestionNumber(item[key]);
+    if (!num || num > list.length || seen.has(num)) {
+      throw new UsageError(`--answers 对象数组题号必须是从 1 到 ${list.length} 的连续不重复整数。`);
+    }
+    seen.add(num);
+    ordered[num - 1] = item.answer;
+  }
+  return ordered;
+}
+
 function parseChoicesInput(raw) {
   if (typeof raw !== 'string' || !raw.trim()) {
     throw new UsageError('请通过 --answers 或 --from 提供选择/判断/填空答案。');
   }
   const trimmed = raw.trim();
   if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
-    const parsed = JSON.parse(trimmed);
-    const list = Array.isArray(parsed) ? parsed : parsed?.answers;
-    if (!Array.isArray(list)) throw new UsageError('--answers JSON 必须是数组或包含 answers 数组的对象。');
-    return list;
+    let parsed;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (error) {
+      throw new UsageError(`--answers JSON 解析失败: ${error?.message || String(error)}`);
+    }
+    const source = parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.hasOwn(parsed, 'answers')
+      ? parsed.answers
+      : parsed;
+    if (Array.isArray(source)) {
+      const objectFlags = source.map(item => Boolean(item) && typeof item === 'object' && !Array.isArray(item));
+      if (objectFlags.every(flag => !flag)) return source;
+      if (objectFlags.every(Boolean)) return normalizeChoiceObjectArray(source);
+      throw new UsageError('--answers JSON 数组不可混用原始答案与对象元素。');
+    }
+    if (source && typeof source === 'object' && !Array.isArray(source)) {
+      const entries = Object.entries(source);
+      if (!entries.length) {
+        throw new UsageError('--answers JSON 对象不能为空，请传入 ["A","BC"] 或 {"1":"A","2":"BC"}。');
+      }
+      const ordered = new Array(entries.length);
+      const seen = new Set();
+      for (const [key, value] of entries) {
+        const num = parseQuestionNumber(key);
+        if (!num || num > entries.length || seen.has(num)) {
+          throw new UsageError(`--answers JSON 必须是答案数组、包含 answers 的对象，或从 1 到 ${entries.length} 连续编号的对象（如 {"1":"A","2":"BC"}）。`);
+        }
+        seen.add(num);
+        ordered[num - 1] = value;
+      }
+      return ordered;
+    }
+    throw new UsageError('--answers JSON 必须是答案数组、包含 answers 的对象，或按题号编号的对象（如 {"1":"A","2":"BC"}）。');
   }
-  return trimmed.split(',').map(part => part.trim()).filter(Boolean).map(token => {
-    if (token === 'true') return true;
-    if (token === 'false') return false;
+  return trimmed.split(',').map(part => {
+    const token = part.trim();
+    const lower = token.toLowerCase();
+    if (lower === 'true') return true;
+    if (lower === 'false') return false;
     return token;
   });
 }
@@ -125,9 +195,10 @@ function printOutput(value, config, formatter) {
 }
 
 function formatInspect(task) {
+  const stateSuffix = task.evaluating ? ' (评测中)' : task.choiceResultHidden ? ' (未公开客观题对错结果)' : '';
   const lines = [
     `标题: ${task.title || '未命名关卡'}`,
-    `类型: ${task.kind}  状态: ${task.state}${task.evaluating ? ' (评测中)' : ''}`,
+    `类型: ${task.kind}  状态: ${task.state}${stateSuffix}`,
     `关卡ID: ${task.binding?.taskId || ''}  nextTaskId: ${task.nextTaskId || '无'}`,
   ];
   if (task.paths?.length) lines.push(`允许编辑文件 (${task.paths.length}): ${task.paths.join(', ')}`);
@@ -166,7 +237,13 @@ function formatEvaluationResult(result) {
   const lines = [
     `评测状态: ${result.state ?? (passed ? 'passed' : 'failed')}${result.evaluating ? ' (仍在评测中)' : ''}`,
   ];
-  if (result.total !== undefined) lines.push(`题数/得分: ${result.correct ?? 0}/${result.total}`);
+  if (result.hiddenResult) {
+    lines.push(`已提交 ${result.total} 题（当前关卡未公开客观题评测结果，平台暂不返回对错计数）。`);
+  } else if (result.total !== undefined && Number.isSafeInteger(result.correct)) {
+    lines.push(`题数/得分: ${result.correct}/${result.total}`);
+  } else if (result.choiceResultHidden) {
+    lines.push('提示: 当前关卡未公开客观题对错结果，成功提交后平台暂不返回对错计数。');
+  }
   if (result.feedback?.choice) {
     const c = result.feedback.choice;
     lines.push(`客观题结果: ${c.correct ?? 0}/${c.total ?? '?'}`);

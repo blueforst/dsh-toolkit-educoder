@@ -32,14 +32,18 @@ test('统一客户端只加载一个模块，注册两个侧栏区域和一个�
   assert.deepEqual(slots.slice(0, 2).map(slot => slot.order), [49, 51]);
   assert.equal(slots[2].order, -1);
   assert.equal(styles.length, 1);
+  assert(styles[0].textContent.includes('--forst-cost-viewport-end'));
   cleanup.forEach(dispose => dispose?.());
   assert(styles[0].removed);
 });
 
 test('服务器入口只额外挂资源监控，额度和费用由固定通用包提供', () => {
   const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const snapshot = JSON.parse(readFileSync(new URL('../vendor/dsh-toolkit-local.source.json', import.meta.url), 'utf8'));
   assert.equal(manifest.name, '@forst/dsh-toolkit');
-  assert.equal(manifest.version, '0.2.0');
+  assert.equal(manifest.version, '0.2.2');
+  assert.equal(manifest.sourceBaselines['dsh-toolkit-local'], snapshot.version);
+  assert.equal(snapshot.version, '0.1.4');
   assert(manifest.files.includes('vendor'), '发行包必须内含固定版本的通用模块');
   assert.equal(Object.keys(manifest.dependencies ?? {}).length, 0, '安装不需要临时抓取本机仓库最新分支');
   const server = readFileSync(new URL('../index.js', import.meta.url), 'utf8');

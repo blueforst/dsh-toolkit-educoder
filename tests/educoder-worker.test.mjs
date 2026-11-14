@@ -88,10 +88,11 @@ function fixture(t, exercises, runAgent, { nativeTools = false, extended = false
       }
       stage.reads++;
       await stage.onInspect?.(stage);
-      const { binding, state, evaluating, marker, nextTaskId, kind, title, instructions, paths, terminalAvailable, failedVerdict, imagesUnavailable } = stage;
+      const { binding, state, evaluating, marker, nextTaskId, kind, title, instructions, paths, terminalAvailable, failedVerdict, imagesUnavailable, choiceResultHidden } = stage;
       return structuredClone({
         binding, state, evaluating, marker, nextTaskId: state === 'passed' ? nextTaskId : undefined, failedVerdict,
         kind, title, instructions, paths, terminalAvailable, imagesUnavailable,
+        ...(choiceResultHidden ? { choiceResultHidden } : {}),
         feedback: { compiler: session.session, publicTests: stage.publicTests },
       });
     },
@@ -150,6 +151,22 @@ function fixture(t, exercises, runAgent, { nativeTools = false, extended = false
       stage.state = stage.evaluatePendingStale ? 'pending' : stage.failFirst && stage.builds === 1 ? 'failed' : 'passed';
       stage.marker = String(stage.builds);
       await stage.afterAccepted?.(signal);
+    },
+    async submitChoices(session, scope, answers, { signal }) {
+      signal.throwIfAborted();
+      const stage = getStage(session, scope);
+      assert.equal(stage.kind, 'choice');
+      actions.push(['submitChoices', stage.binding.taskId, answers]);
+      stage.builds++;
+      if (stage.loseResponse) {
+        throw Object.assign(new Error('choice response lost'), { code: 'uncertain' });
+      }
+      stage.marker = String(Number(stage.marker || '0') + 1);
+      if (stage.choiceResultHidden) {
+        return { state: 'pending', correct: null, total: stage.questions?.length ?? 4, publicResults: false, hiddenResult: true };
+      }
+      stage.state = 'passed';
+      return { state: 'passed', correct: 4, total: 4, publicResults: true };
     },
   };
 
@@ -640,4 +657,99 @@ test('CLI 模式通过平台接口直接保存并触发评测时，worker 能接
   assert.equal(r1.status, 'passed');
   assert.equal(stagePassed.files.get('src/main.py'), 'cli-saved');
   assert.equal(r2.code, 'verification_failed');
+});
+
+test('未公开选择题结果且平台无计分反馈时，创建会话提交后进入 pending_review/choice_result_hidden 而非阻塞前置轮询或重复代理失败', { timeout: 8000 }, async t => {
+  const cliHidden = exercise('a', 1, { kind: 'choice', state: 'pending', marker: '8' });
+  cliHidden.choiceResultHidden = true;
+  const toolHidden = exercise('b', 1, { kind: 'choice', state: 'pending', marker: '3' });
+  toolHidden.choiceResultHidden = true;
+
+  let runsA = 0;
+  let runsB = 0;
+  const { open } = fixture(t, [cliHidden, toolHidden], async run => {
+    assert.equal(run.kind, 'choice');
+    assert.equal(run.choiceResultHidden, true);
+    if (run.accountRef === 'a') {
+      runsA++;
+      await run.onSession('session-hidden-cli-' + runsA);
+      // 模拟 CLI 模式直接提交后 evaluate_count 从 8 增至 9，但平台仍不公开分数
+      cliHidden.marker = '9';
+      return { status: 'finished' };
+    }
+    runsB++;
+    await run.onSession('session-hidden-tool-' + runsB);
+    const feedback = await run.submitChoices(['A'], run.signal);
+    assert.equal(feedback.status, 'submitted');
+    return { status: 'finished' };
+  }, { nativeTools: true, pollMs: 1, pollAttempts: 5 });
+
+  const queue = open();
+  const [t1, t2] = queue.enqueueBatch([scopes.a, scopes.b], { start: true });
+  const [r1, r2] = await Promise.all([
+    expectState(queue, t1.id, 'pending_review'),
+    expectState(queue, t2.id, 'pending_review'),
+  ]);
+  assert.equal(r1.code, 'choice_result_hidden');
+  assert.equal(r1.sessionId, 'session-hidden-cli-1');
+  assert.equal(cliHidden.marker, '9');
+  assert.equal(runsA, 1);
+  assert.equal(r2.code, 'choice_result_hidden');
+  assert.equal(r2.sessionId, 'session-hidden-tool-1');
+  assert.equal(toolHidden.marker, '4');
+  assert.equal(runsB, 1);
+});
+
+test('未公开选择题结果在提交评测期间中断，reconcile 读回 marker 推进后直接收口为 pending_review', { timeout: 8000 }, async t => {
+  const stage = exercise('a', 1, { kind: 'choice', state: 'pending', marker: '4', loseResponse: true });
+  stage.choiceResultHidden = true;
+  let agentRuns = 0;
+  const context = fixture(t, [stage], async run => {
+    agentRuns++;
+    await run.onSession('session-hidden-reconcile-' + agentRuns);
+    try {
+      await run.submitChoices(['A'], run.signal);
+    } catch (error) {
+      assert.equal(error.code, 'uncertain');
+    }
+    return { status: 'finished' };
+  }, { pollMs: 1, pollAttempts: 3 });
+
+  let queue = context.open();
+  const task = queue.enqueue(scopes.a, { start: true });
+  const ambiguous = await expectState(queue, task.id, 'manual');
+  assert.equal(ambiguous.code, 'verification_pending');
+  assert.equal(stage.builds, 1);
+  assert.equal(agentRuns, 1);
+  await queue.close();
+
+  stage.marker = '5';
+  queue = context.open();
+  queue.resume(task.id);
+  const recovered = await expectState(queue, task.id, 'pending_review');
+  assert.equal(recovered.code, 'choice_result_hidden');
+  assert.equal(agentRuns, 1);
+  assert.equal(stage.builds, 1);
+});
+
+test('进入关卡前发现远端仍在评测，一旦外部评测结束即使 marker 未变也能继续执行并通关', { timeout: 8000 }, async t => {
+  const stage = exercise('a', 1, { state: 'failed', marker: '6' });
+  stage.evaluating = true;
+  stage.onInspect = () => {
+    if (stage.evaluating && stage.reads >= 2) stage.evaluating = false;
+  };
+  let runs = 0;
+  const { open } = fixture(t, [stage], async run => {
+    runs++;
+    await run.onSession('session-settled-' + runs);
+    await run.saveFile('src/main.py', 'print(42)', run.signal);
+    await run.evaluate(run.signal);
+    return { status: 'finished' };
+  }, { pollMs: 1, pollAttempts: 5 });
+
+  const queue = open();
+  const task = queue.enqueue(scopes.a, { start: true });
+  const passed = await expectState(queue, task.id, 'passed');
+  assert.equal(passed.sessionId, 'session-settled-1');
+  assert.equal(runs, 1);
 });

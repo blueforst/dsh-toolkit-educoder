@@ -7,9 +7,10 @@ function response() {
   return { writeHead(status, headers) { this.status = status; this.headers = headers; }, end(body) { this.body = body; } };
 }
 test('Go 月额度共享一分钟缓存，合并并发请求并支持 HEAD', async () => {
-  const original = { fetch: globalThis.fetch, now: Date.now, key: process.env.OPENCODE_GO_API_KEY, url: process.env.DSH_METRICS_URL };
+  const original = { fetch: globalThis.fetch, now: Date.now, key: process.env.OPENCODE_GO_API_KEY, url: process.env.DSH_METRICS_URL, relay: process.env.DSH_OPENCODE_GO_USAGE_URL };
   let now = 100000, calls = 0;
   const routes = new Map();
+  delete process.env.DSH_OPENCODE_GO_USAGE_URL;
   process.env.OPENCODE_GO_API_KEY = 'test-credential';
   process.env.DSH_METRICS_URL = 'http://127.0.0.1:9191/metrics';
   Date.now = () => now;
@@ -17,6 +18,8 @@ test('Go 月额度共享一分钟缓存，合并并发请求并支持 HEAD', asy
     calls++;
     assert.equal(url, 'https://opencode.ai/inference/go/v1/usage');
     assert.equal(options.headers.Authorization, 'Bearer test-credential');
+    assert.equal(options.headers['User-Agent'], 'DSH-Toolkit-Go-Quota/1.0');
+    assert.equal(options.redirect, 'error');
     await Promise.resolve();
     return { ok: true, json: async () => ({ usage: { monthly: { percent: 8, status: 'ok', resetsAt: '2026-12-01T00:00:00.000Z' } } }) };
   };
@@ -48,7 +51,51 @@ test('Go 月额度共享一分钟缓存，合并并发请求并支持 HEAD', asy
     const invalid = await get('POST'); assert.equal(invalid.status, 405);
   } finally {
     globalThis.fetch = original.fetch; Date.now = original.now;
-    for (const [name, value] of [['OPENCODE_GO_API_KEY', original.key], ['DSH_METRICS_URL', original.url]]) {
+    for (const [name, value] of [['OPENCODE_GO_API_KEY', original.key], ['DSH_METRICS_URL', original.url], ['DSH_OPENCODE_GO_USAGE_URL', original.relay]]) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  }
+});
+
+test('Go 月额度配置私网代理时免凭证请求代理，公网代理地址被拒绝', async () => {
+  const original = { fetch: globalThis.fetch, key: process.env.OPENCODE_GO_API_KEY, relay: process.env.DSH_OPENCODE_GO_USAGE_URL };
+  let calls = 0;
+  let handler;
+  delete process.env.OPENCODE_GO_API_KEY;
+  process.env.DSH_OPENCODE_GO_USAGE_URL = 'http://172.18.0.1:9192/usage';
+  globalThis.fetch = async (url, options) => {
+    calls++;
+    assert.equal(url, 'http://172.18.0.1:9192/usage');
+    assert.equal('Authorization' in (options.headers ?? {}), false);
+    assert.equal(options.headers['User-Agent'], 'DSH-Toolkit-Go-Quota/1.0');
+    assert.equal(options.redirect, 'error');
+    return { ok: true, json: async () => ({ usage: { monthly: { percent: 15, status: 'ok', resetsAt: '2026-12-01T00:00:00.000Z' } } }) };
+  };
+  try {
+    applyQuota({
+      get: name => (name === 'credentials' ? { resolve: () => { throw new Error('relay mode should not resolve credentials'); } } : undefined),
+      effect: callback => callback(),
+      connection: { requestRejection: () => undefined },
+      webServer: { register: route => { handler = route.handler; return () => {}; } },
+    });
+    const okRes = response(); await handler({ method: 'GET' }, okRes);
+    assert.equal(okRes.status, 200);
+    assert.equal(JSON.parse(okRes.body).monthly.percent, 15);
+    assert.equal(calls, 1);
+
+    process.env.DSH_OPENCODE_GO_USAGE_URL = 'https://example.com/usage';
+    let blockedHandler;
+    applyQuota({
+      effect: callback => callback(),
+      connection: { requestRejection: () => undefined },
+      webServer: { register: route => { blockedHandler = route.handler; return () => {}; } },
+    });
+    const badRes = response(); await blockedHandler({ method: 'GET' }, badRes);
+    assert.equal(badRes.status, 503);
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = original.fetch;
+    for (const [name, value] of [['OPENCODE_GO_API_KEY', original.key], ['DSH_OPENCODE_GO_USAGE_URL', original.relay]]) {
       if (value === undefined) delete process.env[name]; else process.env[name] = value;
     }
   }

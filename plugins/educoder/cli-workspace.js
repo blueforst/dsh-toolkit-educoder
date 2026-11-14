@@ -1,11 +1,12 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rm } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rm } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SOURCE_CLI_ROOT = fileURLToPath(new URL('./cli/', import.meta.url));
 const MANIFEST_NAME = '.manifest.json';
+const SYNC_QUEUES = new Map();
 
 function ensureInside(root, target) {
   const rel = relative(root, target);
@@ -42,16 +43,24 @@ async function ensureRealDirectory(dirPath, rootReal) {
 }
 
 async function writeSafeFile(dest, content, mode = 0o644) {
-  await mkdir(dirname(dest), { recursive: true });
+  const dir = dirname(dest);
+  await mkdir(dir, { recursive: true });
   const existing = await lstat(dest).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
   if (existing?.isSymbolicLink()) throw new Error(`拒绝覆盖符号链接文件：${dest}`);
-  const handle = await open(dest, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, mode);
+  const tempPath = join(dir, `.${basename(dest)}.tmp-${process.pid}-${randomUUID()}`);
+  const handle = await open(tempPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
   try {
     await handle.writeFile(content);
-  } finally {
+    await handle.close();
+    await chmod(tempPath, mode);
+    const currentDest = await lstat(dest).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+    if (currentDest?.isSymbolicLink()) throw new Error(`拒绝覆盖符号链接文件：${dest}`);
+    await rename(tempPath, dest);
+  } catch (error) {
     await handle.close().catch(() => {});
+    await rm(tempPath, { force: true }).catch(() => {});
+    throw error;
   }
-  await chmod(dest, mode);
 }
 
 async function readManifestHashes(manifestPath) {
@@ -77,6 +86,19 @@ export async function syncCliWorkspace(workspaceRoot, {
   reset = process.env.DSH_EDUCODER_CLI_RESET === '1',
 } = {}) {
   const rootCanonical = await realpath(resolve(workspaceRoot));
+  const previous = SYNC_QUEUES.get(rootCanonical) ?? Promise.resolve();
+  const current = previous.catch(() => {}).then(() => performSyncCliWorkspace(rootCanonical, { sourceRoot, reset }));
+  SYNC_QUEUES.set(rootCanonical, current);
+  try {
+    return await current;
+  } finally {
+    if (SYNC_QUEUES.get(rootCanonical) === current) {
+      SYNC_QUEUES.delete(rootCanonical);
+    }
+  }
+}
+
+async function performSyncCliWorkspace(rootCanonical, { sourceRoot, reset }) {
   const cliRoot = await ensureRealDirectory(join(rootCanonical, 'cli'), rootCanonical);
   const baselineRoot = await ensureRealDirectory(join(cliRoot, '.baseline'), cliRoot);
   const tasksRoot = await ensureRealDirectory(join(rootCanonical, 'tasks'), rootCanonical);

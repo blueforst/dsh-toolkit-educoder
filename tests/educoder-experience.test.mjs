@@ -66,3 +66,30 @@ test('经验库不会读取或写入被换成符号链接的文件', async t => 
   await assert.rejects(experience.append('一条经验'));
   assert.equal(await readFile(outside, 'utf8'), 'external data');
 });
+
+test('工作区被移除或 attachSession 异常时自动重建并重试绑定', async t => {
+  const temp = await mkdtemp(join(tmpdir(), 'dsh-educoder-exp-rebind-'));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const root = join(temp, 'EduCoder');
+  const attached = [];
+  let created = 0;
+  const workspaceRegistry = {
+    async create() {
+      created++;
+      const current = created;
+      return {
+        id: `ws-${current}`,
+        async attachSession(sessionId) {
+          if (current === 1) throw new Error('workspace deleted');
+          attached.push(`${current}:${sessionId}`);
+        },
+      };
+    },
+  };
+  const experience = await createExperience({ root, workspaceRegistry });
+  assert.equal(experience.workspace.id, 'ws-1');
+  await experience.attachSession('sess-1');
+  assert.equal(created, 2);
+  assert.equal(experience.workspace.id, 'ws-2');
+  assert.deepEqual(attached, ['2:sess-1']);
+});

@@ -16,6 +16,7 @@ window.__ModuleLoader__.load({
       running: { label: '运行中', tone: 'blue' },
       queued: { label: '排队中', tone: 'blue' },
       waiting: { label: '待启动', tone: 'slate' },
+      pending_review: { label: '待评审', tone: 'amber' },
       paused: { label: '已暂停', tone: 'amber' },
       manual: { label: '需人工处理', tone: 'red' },
       failed: { label: '执行失败', tone: 'red' },
@@ -38,6 +39,7 @@ window.__ModuleLoader__.load({
       invalid_scope: '无法确认该账号有权访问所选作业。',
       invalid_input: '请检查输入内容后重试。',
       verification_pending: '正在等待平台确认评测结果。',
+      choice_result_hidden: '客观题已提交，平台未公开结果，待评审。',
       verification_failed: '平台评测未通过。',
       budget: '已达到任务运行预算。',
       timeout: '任务已达到时间上限。',
@@ -57,12 +59,47 @@ window.__ModuleLoader__.load({
     const commands = {
       start: { label: '启动', drawerLabel: '立即启动', primary: true, states: ['waiting'] },
       pause: { label: '暂停', drawerLabel: '暂停执行', primary: false, states: ['queued', 'running'] },
-      resume: { label: '恢复', drawerLabel: '恢复执行', primary: true, states: ['paused', 'manual', 'failed'] },
-      cancel: { label: '取消任务', drawerLabel: '取消任务', danger: true, states: ['waiting', 'queued', 'running', 'paused', 'manual', 'failed'] },
+      resume: { label: '恢复', drawerLabel: '恢复执行', primary: true, states: ['paused', 'manual', 'failed', 'pending_review'] },
+      cancel: { label: '取消任务', drawerLabel: '取消任务', danger: true, states: ['waiting', 'queued', 'running', 'paused', 'manual', 'failed', 'pending_review'] },
     };
-    const statusFilterOrder = ['running', 'queued', 'waiting', 'manual', 'failed', 'paused', 'passed', 'cancelled'];
+    const statusFilterOrder = ['running', 'queued', 'waiting', 'pending_review', 'manual', 'failed', 'paused', 'passed', 'cancelled'];
+    const statusRank = new Map(statusFilterOrder.map((status, index) => [status, index]));
+    const queueSortOptions = [
+      ['updated-desc', '最近更新'],
+      ['updated-asc', '最早更新'],
+      ['created-desc', '最新创建'],
+      ['created-asc', '最早创建'],
+      ['status', '状态优先'],
+    ];
+    const defaultQueueSort = 'updated-desc';
     const activeStatuses = new Set(['running', 'queued']);
     const issueStatuses = new Set(['manual', 'failed']);
+    const completedStatuses = new Set(['passed', 'pending_review']);
+
+    const timestampMs = value => {
+      if (typeof value !== 'string' || !value) return null;
+      const ts = Date.parse(value);
+      return Number.isFinite(ts) ? ts : null;
+    };
+    const compareTime = (a, b, asc = false) => {
+      const ta = timestampMs(a);
+      const tb = timestampMs(b);
+      if (ta === tb) return 0;
+      if (ta === null) return 1;
+      if (tb === null) return -1;
+      return asc ? ta - tb : tb - ta;
+    };
+    const compareTasks = (a, b, sortBy = defaultQueueSort) => {
+      if (sortBy === 'status') {
+        const rankDiff = (statusRank.get(a.status) ?? statusFilterOrder.length) -
+          (statusRank.get(b.status) ?? statusFilterOrder.length);
+        if (rankDiff !== 0) return rankDiff;
+      }
+      const asc = sortBy === 'updated-asc' || sortBy === 'created-asc';
+      const primary = sortBy === 'created-desc' || sortBy === 'created-asc' ? 'createdAt' : 'updatedAt';
+      const secondary = primary === 'createdAt' ? 'updatedAt' : 'createdAt';
+      return compareTime(a[primary], b[primary], asc) || compareTime(a[secondary], b[secondary], asc);
+    };
 
     const formatDate = value => {
       if (!value) return '';
@@ -358,10 +395,6 @@ window.__ModuleLoader__.load({
       return { loading: Boolean(scope) && !matching, items: matching ? entry.items : [], error: matching ? entry.error : '' };
     }
 
-    function resolveLinkedTask(tasks, accountId, courseId, homeworkId) {
-      return tasks.find(task => task.accountId === accountId && task.courseId === courseId && task.homeworkId === homeworkId) || null;
-    }
-
     function CatalogStage({
       account, version, refreshCatalog, tasks, tasksEnabled, busy, activeKey,
       checkedMap, onToggleHomework, onToggleAllVisible, onRemoveCheckedKey, onClearChecked, onAllocateChecked,
@@ -379,18 +412,37 @@ window.__ModuleLoader__.load({
         accountId: account?.id, courseId: currentCourse,
       }, version);
 
+      const linkedTaskMap = useMemo(() => {
+        if (!tasksEnabled || !account || !currentCourse) return new Map();
+        const map = new Map();
+        for (const task of tasks) {
+          if (task.accountId === account.id && task.courseId === currentCourse) map.set(task.homeworkId, task);
+        }
+        return map;
+      }, [tasks, tasksEnabled, account?.id, currentCourse]);
+
+      const hwState = hw => {
+        const hasCounts = Number.isSafeInteger(hw.taskCount) && hw.taskCount > 0;
+        const rawPassed = hw.passedCount ?? 0;
+        const linkedTask = linkedTaskMap.get(hw.id) || null;
+        const taskDone = Boolean(linkedTask && completedStatuses.has(linkedTask.status));
+        const done = (hasCounts && rawPassed >= hw.taskCount) || taskDone;
+        const passed = hasCounts ? (done ? hw.taskCount : Math.min(hw.taskCount, rawPassed)) : 0;
+        return { hasCounts, passed, done, linkedTask };
+      };
+
       const query = hwSearch.trim().toLocaleLowerCase();
       const summary = useMemo(() => {
         let totalStages = 0;
         let passedStages = 0;
         let doneCount = 0;
         for (const hw of homeworks.items) {
-          const hasCount = Number.isSafeInteger(hw.taskCount) && hw.taskCount > 0;
-          if (hasCount) {
+          const state = hwState(hw);
+          if (state.hasCounts) {
             totalStages += hw.taskCount;
-            passedStages += Math.min(hw.taskCount, hw.passedCount ?? 0);
-            if ((hw.passedCount ?? 0) >= hw.taskCount) doneCount += 1;
+            passedStages += state.passed;
           }
+          if (state.done) doneCount += 1;
         }
         return {
           totalStages,
@@ -399,18 +451,17 @@ window.__ModuleLoader__.load({
           pendingCount: homeworks.items.length - doneCount,
           pctVal: pct(passedStages, totalStages),
         };
-      }, [homeworks.items]);
+      }, [homeworks.items, linkedTaskMap]);
 
       const filtered = useMemo(() => homeworks.items.filter(hw => {
-        const hasCount = Number.isSafeInteger(hw.taskCount) && hw.taskCount > 0;
-        const done = hasCount && (hw.passedCount ?? 0) >= hw.taskCount;
+        const { done } = hwState(hw);
         if (hwFilter === 'pending' && done) return false;
         if (hwFilter === 'done' && !done) return false;
         if (query && !hw.title.toLocaleLowerCase().includes(query) && !String(hw.id).toLocaleLowerCase().includes(query)) {
           return false;
         }
         return true;
-      }), [homeworks.items, hwFilter, query]);
+      }), [homeworks.items, hwFilter, query, linkedTaskMap]);
 
       const allFilteredChecked = Boolean(
         account && currentCourse && filtered.length > 0 &&
@@ -524,11 +575,11 @@ window.__ModuleLoader__.load({
                       filtered.map(hw => {
                         const key = `${account.id}:${currentCourse}:${hw.id}`;
                         const checked = tasksEnabled && checkedMap.has(key);
-                        const hasCounts = Number.isSafeInteger(hw.taskCount) && hw.taskCount > 0;
-                        const passed = hw.passedCount ?? 0;
-                        const done = hasCounts && passed >= hw.taskCount;
+                        const { hasCounts, passed, done, linkedTask } = hwState(hw);
                         const hwPct = hasCounts ? pct(passed, hw.taskCount) : 0;
-                        const linkedTask = tasksEnabled ? resolveLinkedTask(tasks, account.id, currentCourse, hw.id) : null;
+                        const progressLabel = done
+                          ? (linkedTask?.status === 'pending_review' && (hw.passedCount ?? 0) < hw.taskCount ? '已完成' : '已通关')
+                          : passed + '/' + hw.taskCount + ' 关';
 
                         return h('div', {
                           key: hw.id, role: 'option', 'aria-selected': checked,
@@ -549,7 +600,7 @@ window.__ModuleLoader__.load({
                         h('div', { className: 'edu-hw-progress-cell' },
                           hasCounts ? h(React.Fragment, null,
                             h('div', { className: 'edu-hw-progress-label edu-tabular' },
-                              h('span', null, done ? '已通关' : passed + '/' + hw.taskCount + ' 关'),
+                              h('span', null, progressLabel),
                               h('span', { className: 'edu-muted' }, hwPct, '%')),
                             h('div', { className: 'edu-hw-progress-bar' },
                               h('span', { className: done ? 'done' : undefined, style: { width: hwPct + '%' } })))
@@ -606,7 +657,7 @@ window.__ModuleLoader__.load({
     function QueueStage({
       tasks, accounts, busy, activeKey, concurrency, saveConcurrency,
       runCommand, inspectTask, openSession, drawerTaskId,
-      statusFilter, setStatusFilter,
+      statusFilter, setStatusFilter, sortBy = defaultQueueSort, setSortBy,
     }) {
       const [query, setQuery] = useState('');
       const [checkedIds, setCheckedIds] = useState([]);
@@ -622,12 +673,14 @@ window.__ModuleLoader__.load({
         return map;
       }, [tasks]);
 
-      const visible = useMemo(() => tasks.filter(task => (!statusFilter || task.status === statusFilter)
-        && (!search || [
-          task.id, task.courseId, task.homeworkId, task.courseTitle, task.homeworkTitle,
-          accountsById.get(task.accountId)?.label, taskMessage(task.code),
-        ].some(val => typeof val === 'string' && val.toLocaleLowerCase().includes(search)))),
-      [tasks, statusFilter, search, accountsById]);
+      const visible = useMemo(() => tasks
+        .filter(task => (!statusFilter || task.status === statusFilter)
+          && (!search || [
+            task.id, task.courseId, task.homeworkId, task.courseTitle, task.homeworkTitle,
+            accountsById.get(task.accountId)?.label, taskMessage(task.code),
+          ].some(val => typeof val === 'string' && val.toLocaleLowerCase().includes(search))))
+        .sort((a, b) => compareTasks(a, b, sortBy)),
+      [tasks, statusFilter, search, accountsById, sortBy]);
 
       const visibleIdSet = useMemo(() => new Set(visible.map(task => task.id)), [visible]);
       const checkedTaskSet = useMemo(() => new Set(checkedIds), [checkedIds]);
@@ -681,6 +734,14 @@ window.__ModuleLoader__.load({
                 onChange: event => setQuery(event.target.value),
                 placeholder: '搜索账号、课程或作业…', 'aria-label': '搜索任务',
               })),
+            h('div', { className: 'edu-sort-control' },
+              h('span', { className: 'edu-stepper-label', 'aria-hidden': true }, '排序'),
+              h('select', {
+                className: 'edu-sort-select',
+                'aria-label': '队列排序',
+                value: sortBy,
+                onChange: event => setSortBy?.(event.target.value),
+              }, queueSortOptions.map(([value, label]) => h('option', { key: value, value }, label)))),
             concurrency !== null && h('div', { className: 'edu-stepper', role: 'group', 'aria-label': '全局并发上限' },
               h('span', { className: 'edu-stepper-label' }, '全局并发'),
               h('button', {
@@ -734,7 +795,17 @@ window.__ModuleLoader__.load({
                     h('th', null, '作业与课程'),
                     h('th', { style: { width: '132px' } }, '账号'),
                     h('th', { style: { width: '260px' } }, '状态与说明'),
-                    h('th', { className: 'edu-col-time', style: { width: '96px' } }, '更新时间'),
+                    h('th', {
+                      className: 'edu-col-time',
+                      style: { width: '108px' },
+                      'aria-sort': sortBy === 'updated-desc' ? 'descending' : sortBy === 'updated-asc' ? 'ascending' : 'none',
+                    }, h('button', {
+                      type: 'button',
+                      className: 'edu-th-sort',
+                      title: sortBy === 'updated-desc' ? '当前按更新时间从新到旧排序，点击切换' : '点击按更新时间从新到旧排序',
+                      onClick: () => setSortBy?.(prev => prev === 'updated-desc' ? 'updated-asc' : 'updated-desc'),
+                    }, '更新时间', h('span', { className: 'edu-th-arrow', 'aria-hidden': true },
+                      sortBy === 'updated-desc' ? '↓' : sortBy === 'updated-asc' ? '↑' : '↕'))),
                     h('th', { className: 'edu-text-right', style: { width: '188px' } }, '操作'))),
                   h('tbody', null, visible.map(task => {
                     const account = accountsById.get(task.accountId);
@@ -832,7 +903,7 @@ window.__ModuleLoader__.load({
               'edu-drawer-callout',
               status === 'passed' && 'ok',
               (status === 'running' || status === 'queued') && 'info',
-              (status === 'manual' || status === 'paused') && 'warn',
+              (status === 'manual' || status === 'paused' || status === 'pending_review') && 'warn',
               status === 'cancelled' && 'neutral',
             ].filter(Boolean).join(' '),
           }, h('strong', null, status === 'passed' ? '核验结果：' : '状态说明：'), taskMessage(code)),
@@ -896,6 +967,7 @@ window.__ModuleLoader__.load({
       const [log, setLog] = useState(null);
       const [loaded, setLoaded] = useState(false);
       const [statusFilter, setStatusFilter] = useState('');
+      const [sortBy, setSortBy] = useState(defaultQueueSort);
       const [modal, setModal] = useState(null);
 
       const operation = useRef(null);
@@ -1029,7 +1101,15 @@ window.__ModuleLoader__.load({
       }
 
       function mergeTasks(updated) {
-        setTasks(prev => [...updated, ...prev.filter(task => !updated.some(item => item.id === task.id))]);
+        const byId = new Map(updated.map(task => [task.id, task]));
+        setTasks(prev => {
+          const seen = new Set(prev.map(task => task.id));
+          const added = [];
+          for (const task of byId.values()) {
+            if (!seen.has(task.id)) added.push(task);
+          }
+          return [...added, ...prev.map(task => byId.get(task.id) || task)];
+        });
       }
 
       async function allocateTargets(targets, start, clearChecked) {
@@ -1171,7 +1251,7 @@ window.__ModuleLoader__.load({
             : effectiveTab === 'queue'
               ? h(QueueStage, {
                 tasks, accounts, busy, activeKey, concurrency,
-                statusFilter, setStatusFilter, drawerTaskId: log?.id,
+                statusFilter, setStatusFilter, sortBy, setSortBy, drawerTaskId: log?.id,
                 saveConcurrency: value => perform('settings', async signal => {
                   const settings = await request('settings', { concurrency: value }, signal);
                   setConcurrency(settings.concurrency);
@@ -1391,7 +1471,7 @@ window.__ModuleLoader__.load({
       /* Status Dots & Pills */
       .edu-dot{width:7px;height:7px;border-radius:999px;display:inline-block;flex:none}
       .edu-dot-ready,.edu-dot-passed{background:var(--edu-green)}
-      .edu-dot-unverified,.edu-dot-paused{background:var(--edu-amber)}
+      .edu-dot-unverified,.edu-dot-paused,.edu-dot-pending_review{background:var(--edu-amber)}
       .edu-dot-auth_required,.edu-dot-manual,.edu-dot-failed{background:var(--edu-red)}
       .edu-dot-running,.edu-dot-queued{background:var(--edu-accent);box-shadow:0 0 0 3px var(--edu-accent-soft);animation:edu-pulse-dot 1.8s infinite}
       .edu-dot-waiting,.edu-dot-cancelled{background:var(--edu-faint)}
@@ -1610,6 +1690,18 @@ window.__ModuleLoader__.load({
       .edu-stepper button:hover:not(:disabled){background:var(--edu-hover);color:var(--edu-text)}
       .edu-stepper button:disabled{opacity:.4;cursor:not-allowed}
       .edu-stepper-val{min-width:24px;text-align:center;font-weight:650;font-size:12.5px}
+      .edu-sort-control{
+        display:inline-flex;align-items:center;height:31px;border-radius:8px;
+        border:1px solid var(--edu-border);background:var(--edu-surface);overflow:hidden;
+      }
+      .edu-sort-control:focus-within{border-color:var(--edu-accent);box-shadow:0 0 0 3px var(--edu-accent-soft)}
+      .edu-sort-select{
+        height:100%;border:none;background:var(--edu-surface);color:var(--edu-text);
+        font:inherit;font-size:12px;font-weight:500;padding:0 8px;cursor:pointer;outline:none;
+      }
+      .edu-sort-select:hover{background:var(--edu-hover)}
+      .edu-panel .edu-sort-select:focus-visible{outline:none}
+      .edu-sort-select option{background:var(--edu-surface);color:var(--edu-text)}
 
       .edu-queue-bulk{
         flex:0 0 auto;padding:8px 20px;background:var(--edu-accent-soft);
@@ -1622,6 +1714,12 @@ window.__ModuleLoader__.load({
         text-align:left;padding:9px 14px;font-size:11.5px;font-weight:600;color:var(--edu-muted);
         background:var(--edu-subtle);border-bottom:1px solid var(--edu-border);white-space:nowrap;
       }
+      .edu-th-sort{
+        display:inline-flex;align-items:center;gap:4px;padding:0;border:none;background:transparent;
+        color:inherit;font:inherit;cursor:pointer;white-space:nowrap;
+      }
+      .edu-th-sort:hover{color:var(--edu-text)}
+      .edu-th-arrow{font-size:11px;opacity:.8}
       .edu-q-table td{padding:11px 14px;border-bottom:1px solid var(--edu-border);vertical-align:middle}
       .edu-q-table tr:last-child td{border-bottom:none}
       .edu-q-table tbody tr{cursor:pointer;transition:background-color .1s ease}

@@ -17,7 +17,7 @@ const FAKE_SESSION = {
   zzud: 'zzud-user-7001',
 };
 
-function startMockEduCoder(t, { mode = 'code', staleBeforeEvaluating = false, failFirstBuild = false } = {}) {
+function startMockEduCoder(t, { mode = 'code', staleBeforeEvaluating = false, failFirstBuild = false, hiddenChoiceResult = false } = {}) {
   let codeContent = '# starter\nsecret_echo = "ok"\n';
   let builds = 0;
   let inspectAfterBuild = 0;
@@ -25,6 +25,7 @@ function startMockEduCoder(t, { mode = 'code', staleBeforeEvaluating = false, fa
   let state = 'pending';
   let kind = mode;
   let evaluateCount = 0;
+  let choiceSubmitted = false;
   let imagePng = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   const calls = [];
 
@@ -79,14 +80,18 @@ function startMockEduCoder(t, { mode = 'code', staleBeforeEvaluating = false, fa
         last_compile_output: state === 'passed' ? '全部通过' : '',
         test_sets: [{ is_public: true, result: state === 'passed', input: '1', output: '2', actual_output: state === 'passed' ? '2' : '0' }],
         ...(kind === 'choice' ? {
+          shixun_choice_public_result: !hiddenChoiceResult,
           chooses: [
             { question_name: '单选题', category: 1, subject: '1+1=?', challenge_question: [{ option_name: '2' }, { option_name: '3' }] },
             { question_name: '判断题', subject: '地球是圆的' },
           ],
           choose_test_cases: {
             challenge_chooses_count: 2,
-            choose_correct_num: state === 'passed' ? 2 : 0,
-            had_submmit: state === 'passed' ? 1 : 0,
+            choose_correct_num: hiddenChoiceResult ? null : state === 'passed' ? 2 : 0,
+            had_submmit: hiddenChoiceResult || state === 'passed' || choiceSubmitted ? 1 : 0,
+            test_sets: hiddenChoiceResult
+              ? [{ position: 1, result: null }, { position: 2, result: null }]
+              : undefined,
           },
         } : {}),
         ...(state === 'passed' ? { next_game: 'task-102' } : {}),
@@ -130,12 +135,16 @@ function startMockEduCoder(t, { mode = 'code', staleBeforeEvaluating = false, fa
 
     if (req.method === 'POST' && url.pathname === '/api/tasks/task-101/choose_build.json') {
       builds++;
-      state = 'passed';
+      evaluateCount++;
+      choiceSubmitted = true;
+      state = hiddenChoiceResult ? 'pending' : 'passed';
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         status: 0,
+        had_submmit: true,
         challenge_chooses_count: 2,
-        choose_correct_num: 2,
+        choose_correct_num: hiddenChoiceResult ? null : 2,
+        ...(hiddenChoiceResult ? { test_sets: [{ position: 1, result: null }, { position: 2, result: null }] } : {}),
       }));
       return;
     }
@@ -404,4 +413,139 @@ test('工作区 CLI 支持直接评测当前提交、宽限轮询启动延迟、
   const eval2 = JSON.parse((await runCliProcess(cliInfo.entrypoint, ['evaluate', '--poll-ms', '20', '--poll-attempts', '6', '--json'], reuse.env)).stdout);
   assert.equal(eval2.state, 'passed');
   assert.equal(reuse.mock.getBuilds(), 2);
+});
+
+test('并发调用 syncCliWorkspace 时不会互相截断 CLI 文件或损坏 manifest', async t => {
+  const sharedRoot = await mkdtemp(join(tmpdir(), 'dsh-cli-concurrent-'));
+  t.after(() => rm(sharedRoot, { recursive: true, force: true }));
+  const results = await Promise.all(Array.from({ length: 6 }, () => syncCliWorkspace(sharedRoot)));
+  const entrypoints = new Set(results.map(item => item.entrypoint));
+  assert.equal(entrypoints.size, 1);
+  const manifest = JSON.parse(await readFile(join(results[0].baselineRoot, '.manifest.json'), 'utf8'));
+  assert.ok(manifest.files['educoder.mjs']);
+});
+
+test('CLI 在未公开客观题对错结果模式下可 inspect 并完成 submit-choices 提交', async t => {
+  const sharedRoot = await mkdtemp(join(tmpdir(), 'dsh-cli-hidden-choice-'));
+  t.after(() => rm(sharedRoot, { recursive: true, force: true }));
+  const cliInfo = await syncCliWorkspace(sharedRoot);
+  const workdir = await ensureTaskWorkdir(sharedRoot, 'acc1-hidden-choice');
+  const mock = await startMockEduCoder(t, { mode: 'choice', hiddenChoiceResult: true });
+
+  const env = {
+    DSH_EDUCODER_CLI: cliInfo.entrypoint,
+    DSH_EDUCODER_CLI_ROOT: cliInfo.cliRoot,
+    DSH_EDUCODER_WORKDIR: workdir,
+    DSH_EDUCODER_API_URL: mock.apiUrl,
+    DSH_EDUCODER_SESSION: JSON.stringify(FAKE_SESSION),
+    DSH_EDUCODER_TARGET: JSON.stringify({
+      courseId: 'course-1',
+      homeworkId: '202',
+      taskId: 'task-101',
+      binding: {
+        courseId: 'course-1',
+        homeworkId: '202',
+        taskId: 'task-101',
+        practiceId: 'practice-303',
+        remoteUserId: '7001',
+        gameId: '404',
+        challengeId: '505',
+      },
+    }),
+    DSH_EDUCODER_READONLY: '0',
+    DSH_EDUCODER_TERMINAL_ENABLED: '0',
+    DSH_EDUCODER_BROWSER_INSPECTION: '0',
+  };
+
+  const inspectText = (await runCliProcess(cliInfo.entrypoint, ['inspect'], env)).stdout;
+  assert.match(inspectText, /未公开客观题对错结果/);
+  assert.ok(!inspectText.includes('评测中'));
+
+  const inspectJson = JSON.parse((await runCliProcess(cliInfo.entrypoint, ['inspect', '--json'], env)).stdout);
+  assert.equal(inspectJson.evaluating, false);
+  assert.equal(inspectJson.choiceResultHidden, true);
+
+  const submitText = (await runCliProcess(cliInfo.entrypoint, ['submit-choices', '--answers', '["A",true]'], env)).stdout;
+  assert.match(submitText, /已提交 2 题/);
+  assert.doesNotMatch(submitText, /0\/2/);
+
+  const submitJson = JSON.parse((await runCliProcess(cliInfo.entrypoint, [
+    'submit-choices', '--answers', '["A",true]', '--json',
+  ], env)).stdout);
+  assert.equal(submitJson.state, 'pending');
+  assert.equal(submitJson.hiddenResult, true);
+  assert.equal(submitJson.correct, null);
+  assert.equal(submitJson.total, 2);
+});
+
+test('submit-choices 兼容常见 JSON 格式并输出清晰校验详情（不含堆栈噪音）', async t => {
+  const sharedRoot = await mkdtemp(join(tmpdir(), 'dsh-cli-choice-formats-'));
+  t.after(() => rm(sharedRoot, { recursive: true, force: true }));
+  const cliInfo = await syncCliWorkspace(sharedRoot);
+  const workdir = await ensureTaskWorkdir(sharedRoot, 'acc1-choice-formats');
+  const mock = await startMockEduCoder(t, { mode: 'choice', hiddenChoiceResult: true });
+
+  const env = {
+    DSH_EDUCODER_CLI: cliInfo.entrypoint,
+    DSH_EDUCODER_CLI_ROOT: cliInfo.cliRoot,
+    DSH_EDUCODER_WORKDIR: workdir,
+    DSH_EDUCODER_API_URL: mock.apiUrl,
+    DSH_EDUCODER_SESSION: JSON.stringify(FAKE_SESSION),
+    DSH_EDUCODER_TARGET: JSON.stringify({
+      courseId: 'course-1',
+      homeworkId: '202',
+      taskId: 'task-101',
+      binding: {
+        courseId: 'course-1',
+        homeworkId: '202',
+        taskId: 'task-101',
+        practiceId: 'practice-303',
+        remoteUserId: '7001',
+        gameId: '404',
+        challengeId: '505',
+      },
+    }),
+    DSH_EDUCODER_READONLY: '0',
+  };
+
+  // 对象数组 format: [{"index":2,"answer":true},{"index":1,"answer":"A"}]
+  const objArrayRes = JSON.parse((await runCliProcess(cliInfo.entrypoint, [
+    'submit-choices', '--answers', '[{"index":2,"answer":true},{"index":1,"answer":"A"}]', '--json',
+  ], env)).stdout);
+  assert.equal(objArrayRes.total, 2);
+
+  // 题号映射对象 format: {"1":"A","2":"true"}
+  const indexMapRes = JSON.parse((await runCliProcess(cliInfo.entrypoint, [
+    'submit-choices', '--answers', '{"1":"A","2":"true"}', '--json',
+  ], env)).stdout);
+  assert.equal(indexMapRes.total, 2);
+
+  // Q-prefixed map inside {"answers": ...}
+  const qMapRes = JSON.parse((await runCliProcess(cliInfo.entrypoint, [
+    'submit-choices', '--answers', '{"answers":{"Q1":"A","Q2":false}}', '--json',
+  ], env)).stdout);
+  assert.equal(qMapRes.total, 2);
+
+  // 单选题传多字母应精准报出第 1 题(single) 且不打印堆栈追踪
+  await assert.rejects(
+    runCliProcess(cliInfo.entrypoint, ['submit-choices', '--answers', '["AB",true]'], env),
+    err => {
+      assert.equal(err.code, 1);
+      assert.match(err.stderr, /^\[educoder-cli error\] \[invalid_input\] /);
+      assert.match(err.stderr, /第 1 题\(single\).*仅允许 1 个选项.*收到 2 个/);
+      assert.doesNotMatch(err.stderr, /\n\s+at /);
+      return true;
+    },
+  );
+
+  // 非法 JSON 返回 UsageError (exit code 2) 且不含堆栈噪音
+  await assert.rejects(
+    runCliProcess(cliInfo.entrypoint, ['submit-choices', '--answers', '{"1":'], env),
+    err => {
+      assert.equal(err.code, 2);
+      assert.match(err.stderr, /^\[educoder-cli error\] --answers JSON 解析失败/);
+      assert.doesNotMatch(err.stderr, /\n\s+at /);
+      return true;
+    },
+  );
 });

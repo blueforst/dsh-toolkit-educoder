@@ -13,9 +13,9 @@ const MAX_CONCURRENCY = 32;
 const ID = /^[\w.:-]{1,160}$/u;
 const MARKER = /^[\w.:/+@-]{0,160}$/u;
 const BINDING_KEYS = ['courseId', 'homeworkId', 'taskId', 'practiceId', 'remoteUserId', 'gameId', 'challengeId'];
-const WORKER_RESULTS = new Set(['passed', 'failed', 'manual', 'paused']);
+const WORKER_RESULTS = new Set(['passed', 'failed', 'manual', 'paused', 'pending_review']);
 const TERMINAL = new Set(['passed', 'cancelled']);
-const USER_ACTION = new Set(['paused', 'manual', 'failed']);
+const USER_ACTION = new Set(['paused', 'manual', 'failed', 'pending_review']);
 const MANUAL_CODES = new Set([
   'auth_required', 'invalid_credentials', 'signature_error', 'invalid_scope', 'manual_required',
   'terminal_unavailable', 'verification_pending', 'uncertain', 'write_unverified', 'stale_scope',
@@ -23,8 +23,8 @@ const MANUAL_CODES = new Set([
   'choice_closed',
 ]);
 const SAFE_CODES = new Set([
-  ...MANUAL_CODES, 'unavailable', 'invalid_input', 'verification_failed', 'budget',
-  'timeout', 'cancelled', 'agent_failed', 'busy', 'already_exists', 'not_found',
+  ...MANUAL_CODES, 'unavailable', 'invalid_input', 'verification_failed', 'choice_result_hidden',
+  'budget', 'timeout', 'cancelled', 'agent_failed', 'busy', 'already_exists', 'not_found',
   'invalid_state', 'retry_limit', 'recovery_required', 'next_stage', 'stage_limit',
   'resume_after_readback',
 ]);
@@ -107,6 +107,25 @@ function publicTask(task, detail = false) {
   };
   if (detail) result.events = structuredClone(task.events);
   return result;
+}
+
+function timestampMs(value) {
+  if (typeof value !== 'string' || !value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function compareTimeDesc(a, b) {
+  const ta = timestampMs(a);
+  const tb = timestampMs(b);
+  if (ta === tb) return 0;
+  if (ta === null) return 1;
+  if (tb === null) return -1;
+  return tb - ta;
+}
+
+function compareTasksByTime(a, b) {
+  return compareTimeDesc(a.updatedAt, b.updatedAt) || compareTimeDesc(a.createdAt, b.createdAt);
 }
 
 function isLocked(error) {
@@ -497,11 +516,12 @@ export function createScheduler({
   try {
     if (all(state).some(task => task.status === 'running')) {
       change(draft => {
+        const at = time();
         for (const task of all(draft).filter(item => item.status === 'running')) {
           task.needsReconcile = true;
           clearSessionResume(task);
           task.retryAt = null;
-          queue(task, draft, time(), 'recovery_required');
+          queue(task, draft, at, 'recovery_required');
         }
       });
     }
@@ -510,21 +530,40 @@ export function createScheduler({
     throw error;
   }
 
+  function resumeQueuedTask(task, draft, at) {
+    const resumablePause = automaticRetries && task.status === 'paused' && !task.mutation && !task.needsReconcile;
+    if (resumablePause || hasVerifiedSuccessor(task, task.status, task.code)) {
+      task.stageContinuation = true;
+      task.stageContinuations = 0;
+      if (resumablePause) task.stageRetries = 0;
+      queue(task, draft, at);
+      return;
+    }
+    if (task.needsReconcile && task.reconcileAttempts >= MAX_RECONCILES) fail('retry_limit');
+    if (!task.needsReconcile && task.attempts >= maxAttempts) fail('retry_limit');
+    const count = task.needsReconcile ? task.reconcileAttempts : task.attempts;
+    if (count && task.status !== 'paused' && retryDelayMs) {
+      task.retryAt = new Date(Date.now() + retryDelayMs * 2 ** Math.min(count - 1, 5)).toISOString();
+    }
+    queue(task, draft, at);
+  }
+
   function enqueueTargets(targets, start, courseRun = false) {
     assertOpen();
     if (typeof start !== 'boolean') fail('invalid_input');
     const normalized = requireBatch(targets, courseRun ? MAX_COURSE_HOMEWORKS : MAX_BATCH).map(normalizeTarget);
     const result = change(draft => {
+      const at = time();
       const tasksByTarget = new Map(all(draft).map(task => [targetKey(task), task]));
       return normalized.map(target => {
         if (accountBlocked(target.accountId)) fail('busy');
         const key = targetKey(target);
         const existing = tasksByTarget.get(key);
         if (existing) {
-          if (existing.status === 'waiting' && start) queue(existing, draft, time());
+          if (start && existing.status === 'waiting') queue(existing, draft, at);
+          else if (start && courseRun && existing.status === 'paused') resumeQueuedTask(existing, draft, at);
           return publicTask(existing);
         }
-        const at = time();
         const task = {
           ...target, id: randomUUID(), status: 'waiting', code: null,
           sessionId: null, sessionResume: null, createdAt: at, updatedAt: at, startedAt: null, finishedAt: null,
@@ -561,34 +600,23 @@ export function createScheduler({
   function controlBatch(action, ids) {
     assertOpen();
     const abort = [];
-    const result = change(draft => requireBatch(ids).map(id => {
-      const task = find(draft, id);
-      if (accountBlocked(task.accountId)) fail('busy');
+    const result = change(draft => {
       const at = time();
-      if (action === 'start' || action === 'resume') {
-        if (task.status === 'queued' || task.status === 'running') return publicTask(task);
-        if (action === 'start' ? task.status !== 'waiting' : !USER_ACTION.has(task.status)) fail('invalid_state');
-        const resumablePause = automaticRetries && task.status === 'paused' && !task.mutation && !task.needsReconcile;
-        if (action === 'resume' && (resumablePause || hasVerifiedSuccessor(task, task.status, task.code))) {
-          task.stageContinuation = true;
-          task.stageContinuations = 0;
-          if (resumablePause) task.stageRetries = 0;
-          queue(task, draft, at);
-          return publicTask(task);
+      return requireBatch(ids).map(id => {
+        const task = find(draft, id);
+        if (accountBlocked(task.accountId)) fail('busy');
+        if (action === 'start' || action === 'resume') {
+          if (task.status === 'queued' || task.status === 'running') return publicTask(task);
+          if (action === 'start' ? task.status !== 'waiting' : !USER_ACTION.has(task.status)) fail('invalid_state');
+          if (action === 'start') queue(task, draft, at);
+          else resumeQueuedTask(task, draft, at);
+        } else {
+          stopTask(task, action, at);
+          abort.push([task.accountId, task.id]);
         }
-        if (task.needsReconcile && task.reconcileAttempts >= MAX_RECONCILES) fail('retry_limit');
-        if (!task.needsReconcile && task.attempts >= maxAttempts) fail('retry_limit');
-        const count = task.needsReconcile ? task.reconcileAttempts : task.attempts;
-        if (count && task.status !== 'paused' && retryDelayMs) {
-          task.retryAt = new Date(Date.now() + retryDelayMs * 2 ** Math.min(count - 1, 5)).toISOString();
-        }
-        queue(task, draft, at);
-      } else {
-        stopTask(task, action, at);
-        abort.push([task.accountId, task.id]);
-      }
-      return publicTask(task);
-    }));
+        return publicTask(task);
+      });
+    });
     for (const [accountId, id] of abort) {
       const running = active.get(accountId);
       if (running?.taskId === id) running.controller.abort(new SchedulerError('cancelled'));
@@ -601,10 +629,11 @@ export function createScheduler({
     assertOpen();
     requireId(accountId);
     const result = change(draft => {
+      const at = time();
       const targets = all(draft).filter(task => task.accountId === accountId &&
         (action === 'cancel' ? !TERMINAL.has(task.status) : ['queued', 'running'].includes(task.status)));
       return targets.map(task => {
-        stopTask(task, action, time());
+        stopTask(task, action, at);
         return publicTask(task);
       });
     });
@@ -648,7 +677,10 @@ export function createScheduler({
     enqueueCourse: targets => enqueueTargets(targets, true, true),
     list({ accountId } = {}) {
       if (accountId !== undefined) requireId(accountId);
-      return all(state).filter(task => accountId === undefined || accountId === task.accountId).map(task => publicTask(task));
+      return all(state)
+        .filter(task => accountId === undefined || accountId === task.accountId)
+        .sort(compareTasksByTime)
+        .map(task => publicTask(task));
     },
     get: id => Object.hasOwn(state.tasks, requireId(id)) ? publicTask(state.tasks[id], true) : null,
     start: id => controlBatch('start', [id])[0],

@@ -66,7 +66,8 @@ export async function createExperience({ root, workspaceRegistry }) {
   await seed(join(canonical, 'README.md'), README);
   await seed(file, SEED);
   const cli = await syncCliWorkspace(canonical);
-  const workspace = workspaceRegistry ? await workspaceRegistry.create(canonical, 'EduCoder') : undefined;
+  let workspace = workspaceRegistry ? await workspaceRegistry.create(canonical, 'EduCoder') : undefined;
+  let attachQueue = Promise.resolve();
   let writes = Promise.resolve();
 
   async function read() {
@@ -105,9 +106,28 @@ export async function createExperience({ root, workspaceRegistry }) {
     return write;
   }
 
+  function attachSession(sessionId) {
+    if (!workspaceRegistry && !workspace) return Promise.resolve();
+    const attach = attachQueue.then(async () => {
+      if (!workspace && workspaceRegistry) {
+        workspace = await workspaceRegistry.create(canonical, 'EduCoder');
+      }
+      try {
+        return await workspace?.attachSession?.(sessionId);
+      } catch (error) {
+        if (!workspaceRegistry) throw error;
+        workspace = await workspaceRegistry.create(canonical, 'EduCoder');
+        return workspace?.attachSession?.(sessionId);
+      }
+    });
+    attachQueue = attach.catch(() => {});
+    return attach;
+  }
+
   return {
     root: canonical,
-    workspace,
+    get workspace() { return workspace; },
+    attachSession,
     cli,
     ensureTaskWorkdir: key => ensureTaskWorkdir(canonical, key),
     read,

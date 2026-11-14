@@ -1,5 +1,21 @@
 # 版本记录
 
+## @forst/dsh-educoder 0.2.9 · 2026-11-14
+
+- **DSH 原生 `SessionController` 常驻会话流程**（`0.2.7` → `0.2.9`）：作业会话改由 `sessionController.create()` 创建与恢复，`Agent` 回合结束后正常回到 `idle` 并留在「EduCoder」工作区与侧栏会话列表中，不再人工调用 `session/disposed` 或移除面板会话。
+- **移除宿主全局 `tools.guard` 边界**（`0.2.8`）：删除向 DSH 宿主注册的全局工具拦截器，普通用户会话完整保留 DSH 原生工具，仅在 EduCoder 作业单轮运行期间于当前 `agentCtx.tools` 上用 `restrict`/`guard` 限定原生编码工具、`workspace-write`/`never` 与内存 `ctx.shellEnv` 环境变量。
+- **待评审任务计入完成**：客观题结果未公开时收口为 `pending_review`（「待评审」，保留手动恢复与取消操作、不计入异常角标），同时在课程目录完成度进度、「未通关 / 已通关」筛选、一键通关按钮状态与 `startCourse` 中按已完成计算并跳过；任务队列默认按更新时间倒序显示并支持切换排序。
+- **工作区可自愈 CLI 与证据核验**（`0.2.3` → `0.2.6`）：EduCoder CLI 下沉至共享工作区 `./cli/` 并附带 `.baseline/` 升级合并基线、`ctx.shellEnv` 按 Agent 内存作用域注入凭据、`educoder-submit-choices` 批量/顺序客观题提交通道以及 `.educoder-cli-state.json` 保存证据读回。
+
+## @forst/dsh-toolkit 0.2.2 · 2026-11-14
+
+- 同步 `@forst/dsh-toolkit-local@0.1.4`：包含 Vertex AI（`gemini-4-carbon`、`gemini-4-hydrogen`）补充费率、DSH `0.2.2-rc.2`/`rc.3` CSS anchor 浮窗定位兼容与 `DSH_OPENCODE_GO_USAGE_URL` 私网代理支持。
+- 为 Pi 会话费用新增 `opencode-go-native` -> `opencode-go` 内置目录别名回退并升级投影版本号（自动重算历史缓存在内），修复经由私有 Go relay（`opencode-go-native/deepseek-v4.1-flash`）的会话未计价问题，同时保持任意未知自定义网关不套用估计价格。
+
+## 0.2.1 · 2026-11-13
+
+- 为 `/opencode-go-quota` 增加 `DSH_OPENCODE_GO_USAGE_URL` 私网额度代理支持。
+
 ## 0.2.0 · 2026-11-10
 
 - 将个人电脑使用的 Go 月额度与 Pi 会话费用分离到 `blueforst/dsh-toolkit-local`，本仓库明确定位为 Linux 服务器版。

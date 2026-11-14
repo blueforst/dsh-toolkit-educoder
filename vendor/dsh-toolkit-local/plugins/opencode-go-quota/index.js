@@ -1,7 +1,22 @@
+import { isIPv4 } from 'node:net';
+
 export const name = 'opencode-go-quota';
 export const inject = ['webServer', 'connection'];
 
 const keyRef = 'OPENCODE_GO_API_KEY';
+const relayRef = 'DSH_OPENCODE_GO_USAGE_URL';
+const usageUrl = 'https://opencode.ai/inference/go/v1/usage';
+
+function relayUrl(value) {
+  const url = new URL(value);
+  const [first, second] = url.hostname.split('.').map(Number);
+  const privateHost = url.hostname === '[::1]' || (isIPv4(url.hostname) &&
+    (first === 127 || first === 10 || (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168)));
+  if (!privateHost || !['http:', 'https:'].includes(url.protocol) ||
+    url.username || url.password || url.search || url.hash) throw new Error('额度代理地址无效');
+  return url.href;
+}
 
 function sendUnavailable(req, res, body) {
   res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -25,11 +40,20 @@ export function apply(ctx) {
     if (Date.now() < nextQuotaAttempt) throw new Error('额度暂不可用');
     quotaPending = (async () => {
       try {
-        const credentials = ctx.get('credentials');
-        const key = credentials ? (await credentials.resolve(keyRef))?.value : process.env[keyRef];
-        if (!key?.trim()) return null;
-        const response = await fetch('https://opencode.ai/inference/go/v1/usage', {
-          headers: { Authorization: `Bearer ${key}`, Accept: 'application/json', 'User-Agent': 'opencode/2.1.2' },
+        const headers = { Accept: 'application/json', 'User-Agent': 'DSH-Toolkit-Go-Quota/1.0' };
+        const relay = process.env[relayRef]?.trim();
+        let endpoint = usageUrl;
+        if (relay) {
+          endpoint = relayUrl(relay);
+        } else {
+          const credentials = ctx.get?.('credentials');
+          const key = (credentials ? (await credentials.resolve(keyRef))?.value : process.env[keyRef])?.trim();
+          if (!key) return null;
+          headers.Authorization = `Bearer ${key}`;
+        }
+        const response = await fetch(endpoint, {
+          headers,
+          redirect: 'error',
           signal: AbortSignal.timeout(5000),
         });
         if (!response.ok) throw new Error('额度请求失败');

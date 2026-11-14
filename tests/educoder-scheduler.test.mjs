@@ -403,3 +403,83 @@ test('默认允许超过 3 次自动重试，且调度异常时记录脱敏日�
   assert.match(serialized, /ECONNRESET/);
   assert.ok(!serialized.includes('secret'));
 });
+
+test('队列列表默认按更新时间倒序排列，同时间按创建时间倒序并保留同批顺序', { timeout: 8000 }, async t => {
+  const { file, open } = setup(t);
+  let queue = open();
+  const [batchFirst, batchSecond] = queue.enqueueBatch([target('a', '10'), target('a', '11')]);
+  await delay(5);
+  const middle = queue.enqueue(target('b', '20'));
+  await delay(5);
+  const newest = queue.enqueue(target('a', '12'));
+  assert.deepEqual(queue.list().map(item => item.id), [newest.id, middle.id, batchFirst.id, batchSecond.id]);
+  assert.deepEqual(queue.list({ accountId: 'a' }).map(item => item.id), [newest.id, batchFirst.id, batchSecond.id]);
+
+  await delay(5);
+  queue.start(batchSecond.id);
+  await until(queue, batchSecond.id, 'paused');
+  assert.deepEqual(queue.list().map(item => item.id), [batchSecond.id, newest.id, middle.id, batchFirst.id]);
+
+  await queue.close();
+  const db = new DatabaseSync(file);
+  try {
+    const state = JSON.parse(db.prepare('SELECT data FROM scheduler_state WHERE id=1').get().data);
+    state.tasks[batchFirst.id].createdAt = '2026-11-14T00:00:01.000Z';
+    state.tasks[batchFirst.id].updatedAt = '2026-11-14T00:00:05.000Z';
+    state.tasks[middle.id].createdAt = '2026-11-14T00:00:03.000Z';
+    state.tasks[middle.id].updatedAt = '2026-11-14T00:00:05.000Z';
+    state.tasks[newest.id].createdAt = '2026-11-14T00:00:04.000Z';
+    state.tasks[newest.id].updatedAt = '2026-11-14T00:00:06.000Z';
+    state.tasks[batchSecond.id].createdAt = '2026-11-14T00:00:02.000Z';
+    state.tasks[batchSecond.id].updatedAt = '2026-11-14T00:00:04.000Z';
+    db.prepare('UPDATE scheduler_state SET data=? WHERE id=1').run(JSON.stringify(state));
+  } finally {
+    db.close();
+  }
+  queue = open();
+  assert.deepEqual(queue.list().map(item => item.id), [newest.id, middle.id, batchFirst.id, batchSecond.id]);
+});
+
+test('pending_review 支持恢复和取消，且课程一键通关仅恢复 paused 而跳过 pending_review', { timeout: 8000 }, async t => {
+  const outcomes = new Map();
+  let runs = 0;
+  const queue = setup(t).open({
+    automaticRetries: true,
+    worker(task, { checkpoint }) {
+      runs++;
+      checkpoint({ binding: bind(task), marker: String(runs) });
+      return outcomes.get(task.homeworkId) ?? { status: 'passed', binding: bind(task), marker: String(runs) };
+    },
+    reconcile: verify,
+  });
+
+  const [pausedTask, reviewTask, freshTask] = queue.enqueueBatch([
+    target('a', '101'), target('a', '102'), target('a', '103'),
+  ]);
+  outcomes.set('101', { status: 'paused', binding: bind(pausedTask), marker: '1', code: null });
+  outcomes.set('102', { status: 'pending_review', binding: bind(reviewTask), marker: '2', code: 'choice_result_hidden' });
+  queue.startBatch([pausedTask.id, reviewTask.id]);
+
+  const pausedState = await until(queue, pausedTask.id, 'paused');
+  const reviewState = await until(queue, reviewTask.id, 'pending_review');
+  assert.ok(pausedState.finishedAt);
+  assert.equal(reviewState.code, 'choice_result_hidden');
+  assert.ok(reviewState.finishedAt);
+
+  outcomes.set('101', { status: 'passed', binding: bind(pausedTask), marker: '3' });
+  const courseStarted = queue.enqueueCourse([
+    target('a', '101'), target('a', '102'), target('a', '103'),
+  ]);
+  assert.equal(courseStarted.find(item => item.id === pausedTask.id).status, 'queued');
+  assert.equal(courseStarted.find(item => item.id === reviewTask.id).status, 'pending_review');
+  assert.equal(courseStarted.find(item => item.id === freshTask.id).status, 'queued');
+
+  await until(queue, pausedTask.id, 'passed');
+  await until(queue, freshTask.id, 'passed');
+  assert.equal(queue.get(reviewTask.id).status, 'pending_review');
+
+  outcomes.set('102', { status: 'passed', binding: bind(reviewTask), marker: '5' });
+  queue.resume(reviewTask.id);
+  const resumedReview = await until(queue, reviewTask.id, 'passed');
+  assert.equal(resumedReview.status, 'passed');
+});

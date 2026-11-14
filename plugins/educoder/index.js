@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createAgentRunner, createSaveEvidenceReader, installEduCoderToolBoundary } from './agent.js';
+import { createAgentRunner, createSaveEvidenceReader } from './agent.js';
 import { createTransport } from './transport.js';
 import { createService } from './service.js';
 import { createExperience } from './experience.js';
@@ -122,7 +122,6 @@ export function apply(ctx) {
   ));
   const root = resolve(process.env.DSH_EDUCODER_STATE_DIR || join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'educoder'));
   ctx.effect(() => {
-    const boundary = dedicated && !publicAdmin ? installEduCoderToolBoundary(ctx) : undefined;
     let proxy;
     let service;
     let unregister;
@@ -148,7 +147,6 @@ export function apply(ctx) {
         experience,
         extended: publicAdmin,
         nativeTools: true,
-        toolBoundary: boundary,
         apiUrl: baseUrl,
         proxyUrl: httpsProxy,
         signingAccessKey: process.env.EDUCODER_SIGNING_ACCESS_KEY,
@@ -179,7 +177,6 @@ export function apply(ctx) {
       });
       unregister = registerApi(ctx, service);
     } catch (error) {
-      boundary?.dispose();
       void service?.close();
       void proxy?.close();
       throw error;
@@ -187,7 +184,6 @@ export function apply(ctx) {
     return async () => {
       unregister();
       try { await service.close(); } finally {
-        boundary?.dispose();
         await proxy.close();
       }
     };

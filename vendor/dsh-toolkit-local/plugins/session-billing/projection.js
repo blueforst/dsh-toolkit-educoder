@@ -3,6 +3,8 @@ import vertexRates from './pi-vertex-pricing.json' with { type: 'json' };
 const moneyFields = ['usd', 'inputUsd', 'outputUsd', 'cacheReadUsd', 'cacheWriteUsd'];
 const emptyTotals = () => ({ usd: 0, inputUsd: 0, outputUsd: 0, cacheReadUsd: 0, cacheWriteUsd: 0, pricedCalls: 0, unpricedCalls: 0 });
 const validCount = n => Number.isFinite(n) && n >= 0;
+const builtinProviderAliases = { 'opencode-go-native': 'opencode-go' };
+const builtinAliasVersion = 1;
 
 function usageOf(data) {
   if (data.usage !== undefined) return data.usage;
@@ -29,6 +31,9 @@ export function createProjection({ z, calculateCost, getBuiltinModels, version }
     if (!models.has(key)) {
       let model;
       try { model = getBuiltinModels(route.provider).find(item => item.id === route.model); } catch {}
+      if (!model && Object.hasOwn(builtinProviderAliases, route.provider)) {
+        try { model = getBuiltinModels(builtinProviderAliases[route.provider]).find(item => item.id === route.model); } catch {}
+      }
       const fallback = route.provider === 'google-vertex' && Object.hasOwn(vertexRates.models, route.model)
         ? vertexRates.models[route.model]
         : undefined;
@@ -60,8 +65,8 @@ export function createProjection({ z, calculateCost, getBuiltinModels, version }
   const parts = version.split('.').map(Number);
   return {
     key: 'forstSessionCost',
-    // 内置 Pi 或补充目录变化时，重放已缓存的会话费用。
-    stateVersion: vertexRates.projectionVersion * 1_000_000 + parts[0] * 10000 + parts[1] * 100 + parts[2],
+    // 内置 Pi、别名映射或补充目录变化时，重放已缓存的会话费用。
+    stateVersion: (vertexRates.projectionVersion + builtinAliasVersion) * 1_000_000 + parts[0] * 10000 + parts[1] * 100 + parts[2],
     stateSchema,
     init: () => ({ totals: emptyTotals(), route: null, last: null }),
     apply(state, event) {

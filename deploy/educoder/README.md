@@ -85,7 +85,7 @@ cd /opt/dsh-educoder-dev
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml config --quiet
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml up -d --wait --wait-timeout 60
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml exec -T dsh \
-  dsh plugin --profile web add --ignore-scripts --save-exact /opt/educoder-packages/forst-dsh-educoder-0.2.2.tgz
+  dsh plugin --profile web add --ignore-scripts --save-exact /opt/educoder-packages/forst-dsh-educoder-0.2.9.tgz
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml restart dsh
 sudo docker compose -f compose.yaml -f compose.educoder-fixture.yaml up -d --wait --wait-timeout 60
 sudo bash smoke-credential-boundary.sh
@@ -112,7 +112,7 @@ API 验收检查登录和 Origin 防护、宿主文件和上传入口阻断、�
 
 ### 启用真实作业执行
 
-安装 EduCoder `0.2.2`，再将 `compose.live-tasks.yaml` 放在现有 Compose 文件之后。默认固定使用 `deepseek-official/deepseek-flash`。使用此路由时，专用实例必须能访问 DeepSeek API，且由受保护的环境文件注入 `DEEPSEEK_API_KEY`。作业会话通过 `tools.guard` 与能力作用域隔离仅挂载 DSH 原生编码工具（`bash`/`pwsh`、`read`、`read_image`、`write`、`edit`、`glob`、`grep`、`job_*`），所有平台交互通过工作区可自愈 CLI（`./cli/educoder.mjs`）执行，不注入 `educoder_*` tool schema，也不挂载 `plan-mode`/`subagent`/`schedule`/`goal`/`skill`/`web_search`/`todo_write`。每个运行中的 Agent 仅通过 `ctx.shellEnv` 临时获取其绑定的内存环境变量并在 `workspace-write` + `never` 下运行。
+安装 EduCoder `0.2.9`，再将 `compose.live-tasks.yaml` 放在现有 Compose 文件之后。默认固定使用 `deepseek-official/deepseek-flash`。使用此路由时，专用实例必须能访问 DeepSeek API，且由受保护的环境文件注入 `DEEPSEEK_API_KEY`。作业会话通过 DSH 原生 `SessionController` 正常创建与驻留（不向宿主注册全局 `tools.guard` 边界，普通用户会话保留完整原生能力），仅在作业回合内于 `agentCtx.tools` 上限定只开放 DSH 原生编码工具（`bash`/`pwsh`、`read`、`read_image`、`write`、`edit`、`glob`、`grep`、`job_*`），所有平台交互通过工作区可自愈 CLI（`./cli/educoder.mjs`）执行，不注入 `educoder_*` tool schema，也不挂载 `plan-mode`/`subagent`/`schedule`/`goal`/`skill`/`web_search`/`todo_write`。每个运行中的 Agent 仅通过 `ctx.shellEnv` 临时获取其绑定的内存环境变量并在 `workspace-write` + `never` 下运行。
 
 若容器只能访问宿主网桥，可安装 [OpenCode Go 模型转发](go-model-relay/README.md)。然后将 `compose.public-go-tasks.yaml` 放在最末（使用允许原生编码工具与更大上下文的 `opencode-go-native` 路由）。该文件从 `/etc/dsh-secrets/educoder-go-model.env` 读入 `DSH_GO_MODEL_TOKEN`；可用 `DSH_EDUCODER_GO_TOKEN_ENV` 指定其他受保护的环境文件。使用与原实例相同的 Compose 项目名和环境参数。若该项目由 systemd 管理，把同一文件顺序写入启动配置。
 

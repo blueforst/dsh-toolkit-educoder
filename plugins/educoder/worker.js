@@ -14,9 +14,19 @@ function passed(remote) {
     : { ...decision(remote), status: 'passed', mutation: null };
 }
 
+function pendingReview(remote) {
+  return { ...decision(remote), status: 'pending_review', code: 'choice_result_hidden', mutation: null };
+}
+
+function markerAdvancedAfter(next, previous, allowEmptyPrevious = false) {
+  if (!/^\d+$/u.test(next)) return false;
+  if (allowEmptyPrevious && previous === '') return Number(next) > 0;
+  return /^\d+$/u.test(previous) && Number(next) > Number(previous);
+}
+
 function failedAfter(remote, marker) {
-  return !remote.evaluating && /^\d+$/u.test(remote.marker) && /^\d+$/u.test(marker) &&
-    Number(remote.marker) > Number(marker) && (remote.state === 'failed' || Boolean(remote.failedVerdict));
+  return !remote.evaluating && markerAdvancedAfter(remote.marker, marker) &&
+    (remote.state === 'failed' || Boolean(remote.failedVerdict));
 }
 
 function confirmsFailure(previous, observed, marker, { priorFailedVerdict = null, settleFinal = false } = {}) {
@@ -34,6 +44,7 @@ function feedback(remote) {
 }
 
 function choiceFeedback(score, status) {
+  if (score.hiddenResult) return '已提交客观题答案；当前实训未公开选择题评测结果。';
   return score.publicResults ? JSON.stringify({ correct: score.correct, total: score.total, results: score.results }) :
     (status === 'passed' ? '平台确认本关通过。' : '平台评测未通过。请检查题意和选项后重试。');
 }
@@ -52,12 +63,12 @@ function redactSession(text, session) {
 export function createWorkers({ transport, accounts, runAgent, inspectBrowser, experience, extended = false, nativeTools = false,
   readSaveEvidence, pollMs = 1500, pollAttempts = 60, maxStages = null, logger }) {
   const extendedMode = Boolean(extended || nativeTools);
-  async function readVerdict(session, target, marker, signal, priorFailedVerdict = null) {
+  async function readVerdict(session, target, marker, signal, priorFailedVerdict = null, { allowSettled = false } = {}) {
     let previous;
     for (let attempt = 0; attempt < pollAttempts; attempt++) {
       if (attempt) await delay(pollMs, undefined, { signal });
       const observed = await transport.inspect(session, target, { signal });
-      if (observed.state === 'passed' || confirmsFailure(previous, observed, marker, {
+      if (observed.state === 'passed' || (allowSettled && !observed.evaluating) || confirmsFailure(previous, observed, marker, {
         priorFailedVerdict,
         settleFinal: attempt === pollAttempts - 1,
       })) return observed;
@@ -90,6 +101,10 @@ export function createWorkers({ transport, accounts, runAgent, inspectBrowser, e
         if (await transport.confirmCurrentCode?.(session, target, marker, { signal })) {
           return { ...decision(remote), status: 'paused', code: 'resume_after_readback', mutation: null };
         }
+      }
+      if (task.mutation?.phase === 'evaluate' && remote.kind === 'choice' && remote.choiceResultHidden &&
+          !remote.evaluating && markerAdvancedAfter(remote.marker, task.mutation.marker, true)) {
+        return pendingReview(remote);
       }
       if (task.mutation?.phase === 'evaluate' && failedAfter(remote, task.mutation.marker)) {
         let observed = remote;
@@ -132,7 +147,14 @@ export function createWorkers({ transport, accounts, runAgent, inspectBrowser, e
         checkpoint(decision(remote));
         if (remote.state !== 'passed') {
           if (remote.evaluating) {
-            const observed = await readVerdict(session, { binding }, task.marker ?? remote.marker, signal, remote.failedVerdict);
+            const observed = await readVerdict(
+              session,
+              { binding },
+              task.marker ?? remote.marker,
+              signal,
+              remote.failedVerdict,
+              { allowSettled: true },
+            );
             if (!observed) return { status: 'failed', code: 'verification_pending' };
             remote = observed;
             checkpoint(decision(remote));
@@ -204,6 +226,12 @@ export function createWorkers({ transport, accounts, runAgent, inspectBrowser, e
                 checkpoint({ ...decision(observed), mutation: null });
                 return { status: lastEvaluation, feedback: redactSession(choiceFeedback(score, lastEvaluation), session) };
               }
+              if (score.hiddenResult && observed.choiceResultHidden && !observed.evaluating) {
+                lastEvaluation = 'hidden';
+                remote = observed;
+                checkpoint({ ...decision(observed), mutation: null });
+                return { status: 'submitted', feedback: choiceFeedback(score, 'pending') };
+              }
               const verified = await readVerdict(session, bound, marker, active);
               if (verified?.state === 'passed') {
                 lastEvaluation = 'passed';
@@ -228,6 +256,7 @@ export function createWorkers({ transport, accounts, runAgent, inspectBrowser, e
               })),
             paths: remote.paths,
             questions: remote.questions,
+            choiceResultHidden: Boolean(remote.choiceResultHidden),
             kind: unsupported ? 'browser' : remote.kind,
             courseId: task.courseId,
             homeworkId: task.homeworkId,
@@ -345,6 +374,11 @@ export function createWorkers({ transport, accounts, runAgent, inspectBrowser, e
               failedAfter(remote, priorMarker) ||
               Boolean(remote.failedVerdict && remote.failedVerdict !== priorFailedVerdict);
             if (failedVerification) return { status: 'failed', code: 'verification_failed' };
+            if (remote.kind === 'choice' && remote.choiceResultHidden && !remote.evaluating &&
+                (lastEvaluation === 'hidden' || markerAdvancedAfter(remote.marker, priorMarker, true)) &&
+                result.status === 'finished') {
+              return pendingReview(remote);
+            }
             const code = ['timeout', 'budget'].includes(result.status) ? result.status : 'agent_failed';
             if (code === 'agent_failed') {
               logger?.warn?.('EduCoder 关卡执行失败。', {

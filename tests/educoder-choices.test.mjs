@@ -127,6 +127,12 @@ test('跨范围、无效答案、平台截止和不明确的已提交状态均�
     ['A', 'AA', false, ['甲', '乙']], ['A', ['AB'], false, ['甲', '乙']],
     ['A', 'AB', '真', ['甲', '乙']], ['A', 'AB', false, ['甲', ' ']],
   ]) await assert.rejects(transport.submitChoices(session, target, invalid), { code: 'invalid_input' })
+  await assert.rejects(
+    transport.submitChoices(session, target, ['AB', ['C', 'A'], false, ['甲', '乙']]),
+    error => error?.code === 'invalid_input'
+      && /第 1 题\(single\)/.test(error?.detail || '')
+      && /仅允许 1 个选项/.test(error?.detail || ''),
+  )
   const { questions } = await transport.inspect(session, target)
   raw.chooses[0].challenge_question.reverse()
   await assert.rejects(transport.submitChoices(session, target, answer, { questions }), { code: 'choice_changed' })
@@ -160,4 +166,50 @@ test('隐藏结果只投影计数，异常评测响应保持待核对', async ()
   await assert.rejects(transport.submitChoices(session, target, answer), { code: 'uncertain' })
   assert.equal((await transport.inspect(session, target)).state, 'pending')
   assert.equal(posts.length, 3)
+})
+
+test('未公开选择题结果且平台省略 choose_correct_num 时，inspect 不阻塞评测且 submitChoices 接受正常回执', async () => {
+  const { transport, raw, state, posts } = fixture()
+  raw.shixun_choice_public_result = false
+  raw.game.status = 0
+  raw.game.evaluate_count = 8
+  raw.choose_test_cases = {
+    had_submmit: true,
+    had_all_submmit: true,
+    challenge_chooses_count: 4,
+    choose_correct_num: null,
+    test_sets: Array.from({ length: 4 }, (_, index) => ({ position: index + 1, result: null })),
+  }
+
+  const inspected = await transport.inspect(session, target)
+  assert.equal(inspected.kind, 'choice')
+  assert.equal(inspected.state, 'pending')
+  assert.equal(inspected.evaluating, false)
+  assert.equal(inspected.choiceResultHidden, true)
+  assert.equal(inspected.marker, '8')
+
+  state.response = {
+    had_submmit: true,
+    challenge_chooses_count: 4,
+    choose_correct_num: null,
+    test_sets: Array.from({ length: 4 }, () => ({ result: null })),
+  }
+  const submitted = await transport.submitChoices(session, target, answer)
+  assert.deepEqual(submitted, {
+    state: 'pending',
+    correct: null,
+    total: 4,
+    publicResults: false,
+    hiddenResult: true,
+  })
+  assert.equal(posts.length, 1)
+
+  // 即使隐藏结果模式下，平台仅出现 status=1 仍视为正在评测，空响应或冲突测试点仍拒绝为 uncertain
+  raw.game.status = 1
+  assert.equal((await transport.inspect(session, target)).evaluating, true)
+  raw.game.status = 0
+  state.response = {}
+  await assert.rejects(transport.submitChoices(session, target, answer), { code: 'uncertain' })
+  state.response = { challenge_chooses_count: 4, test_sets: [{ result: true }, { result: null }, { result: null }, { result: null }] }
+  await assert.rejects(transport.submitChoices(session, target, answer), { code: 'uncertain' })
 })

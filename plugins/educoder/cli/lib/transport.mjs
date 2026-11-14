@@ -228,37 +228,75 @@ function choiceScore(raw, count, publicResults) {
   return { correct, total, publicResults, ...(publicResults && results ? { results } : {}) }
 }
 
+function hiddenChoiceResult(raw, count, publicResults) {
+  if (publicResults || !record(raw) || raw.choose_correct_num != null) return null
+  if (raw.challenge_chooses_count !== undefined && raw.challenge_chooses_count !== count) return null
+  const tests = raw.test_sets
+  if (tests !== undefined) {
+    if (!Array.isArray(tests) || tests.length !== count ||
+        tests.some(item => !record(item) || typeof item.result === 'boolean')) return null
+  }
+  const confirmed = raw.challenge_chooses_count === count ||
+    [true, 1].includes(raw.had_submmit) ||
+    [true, 1].includes(raw.had_all_submmit) ||
+    (Array.isArray(tests) && tests.length === count) ||
+    (Number.isSafeInteger(raw.status) && raw.status >= 0)
+  if (!confirmed) return null
+  return { correct: null, total: count, publicResults: false, hiddenResult: true }
+}
+
 function choiceAnswers(questions, answers) {
-  if (!Array.isArray(answers) || answers.length !== questions.length) fail('invalid_input')
+  if (!Array.isArray(answers) || answers.length !== questions.length) {
+    fail('invalid_input', `共 ${questions.length} 题，收到 ${Array.isArray(answers) ? answers.length : typeof answers} 个答案`)
+  }
   return questions.map((question, index) => {
+    const qNo = index + 1
     const answer = answers[index]
     if (question.type === 'fill') {
       if (!Array.isArray(answer) || answer.length !== question.blankCount ||
           ![...answer].every(value => typeof value === 'string' && value.length <= 2_000 && value.trim())) {
-        fail('invalid_input')
+        const got = Array.isArray(answer) ? `${answer.length} 空` : typeof answer
+        fail('invalid_input', `第 ${qNo} 题(fill) 需要 ${question.blankCount} 个非空字符串数组，收到 ${got}`)
       }
       return [...answer]
     }
     if (question.type === 'judge') {
       if (typeof answer === 'boolean') return String(answer)
-      if (answer !== 'true' && answer !== 'false') fail('invalid_input')
+      if (answer !== 'true' && answer !== 'false') {
+        fail('invalid_input', `第 ${qNo} 题(judge) 仅允许 true 或 false，收到 ${Array.isArray(answer) ? 'array' : typeof answer}`)
+      }
       return answer
     }
-    const selections = question.type === 'multiple' && Array.isArray(answer) ? [...answer] :
-      typeof answer === 'string' ? [...answer] : []
-    if (!selections.length || selections.length > question.options.length ||
-        (question.type === 'single' && selections.length !== 1)) fail('invalid_input')
+    const allowedIds = question.options.map(option => option.id)
+    const allowedSummary = allowedIds.join(',')
+    if (typeof answer !== 'string' && !(question.type === 'multiple' && Array.isArray(answer))) {
+      const expectedFormat = question.type === 'single' ? '单个选项字母字符串' : '选项字母字符串或字符数组'
+      fail('invalid_input', `第 ${qNo} 题(${question.type}) 需要${expectedFormat}，收到 ${Array.isArray(answer) ? 'array' : typeof answer} (可选: ${allowedSummary})`)
+    }
+    const selections = [...answer]
+    if (!selections.length) {
+      fail('invalid_input', `第 ${qNo} 题(${question.type}) 答案不能为空 (可选: ${allowedSummary})`)
+    }
+    if (selections.length > question.options.length || (question.type === 'single' && selections.length !== 1)) {
+      const limit = question.type === 'single' ? '仅允许 1 个选项' : `最多允许 ${question.options.length} 个选项`
+      fail('invalid_input', `第 ${qNo} 题(${question.type}) ${limit}，收到 ${selections.length} 个 (可选: ${allowedSummary})`)
+    }
     const selected = new Set(selections)
-    if (selected.size !== selections.length || selections.some(id => !question.options.some(option => option.id === id))) {
-      fail('invalid_input')
+    if (selected.size !== selections.length) {
+      fail('invalid_input', `第 ${qNo} 题(${question.type}) 包含重复选项 (可选: ${allowedSummary})`)
+    }
+    if (selections.some(id => !allowedIds.includes(id))) {
+      fail('invalid_input', `第 ${qNo} 题(${question.type}) 包含无效选项 (可选: ${allowedSummary})`)
     }
     return [...selected].sort().join('')
   })
 }
 
 function choiceState(score, submitted) {
-  if (score && score.correct === score.total) return 'passed'
-  if (score && submitted) return 'failed'
+  if (score && Number.isSafeInteger(score.correct)) {
+    if (score.correct === score.total) return 'passed'
+    if (submitted) return 'failed'
+  }
   return 'pending'
 }
 
@@ -296,8 +334,11 @@ function normalizeTask(raw, scope, account, taskId, practiceId, supportsTerminal
   const publicText = (value, limit) => typeof value === 'string' ? text(redact(value, secrets), limit) : ''
   const questions = choice ? choiceQuestions(raw.chooses, publicText) : null
   const count = Array.isArray(raw.chooses) && raw.chooses.length ? raw.chooses.length : undefined
-  const score = choice ? choiceScore(raw.choose_test_cases, count,
-    raw.shixun_choice_public_result === true || raw.shixun_choice_public_result === 1) : null
+  const choicePublicResult = raw.shixun_choice_public_result === true || raw.shixun_choice_public_result === 1
+  const score = choice ? choiceScore(raw.choose_test_cases, count, choicePublicResult) : null
+  const choiceResultHidden = Boolean(
+    choice && !choicePublicResult && !score && raw.choose_test_cases?.choose_correct_num == null,
+  )
   const status = game.status
   const choiceSubmitted = [2, 3].includes(status) || [true, 1].includes(raw.choose_test_cases?.had_submmit)
   // 混合关卡也可能提供可读写的代码编辑器。代码能力优先于命令行和图形环境。
@@ -314,15 +355,16 @@ function normalizeTask(raw, scope, account, taskId, practiceId, supportsTerminal
   const task = {
     binding,
     kind,
-    // 头歌可能在选择题有错时也将关卡状态置为 2。只按已提交的答对题数认定通过。
+    // 头歌可能在选择题有错时也将关卡状态置为 2；未公开结果且平台未下发计数时，不能当成正在评测。
     state: choice ? choiceState(score, choiceSubmitted) : status === 2 ? 'passed' : status === 3 ? 'failed' : 'pending',
-    evaluating: status === 1 || (choice && choiceSubmitted && !score),
+    evaluating: status === 1 || (choice && choiceSubmitted && !score && !choiceResultHidden),
     title: publicText(challenge.subject, 1_000),
     instructions: publicText(challenge.description || challenge.task_pass || game.description, 128_000),
     terminalAvailable: (kind === 'code' || kind === 'terminal') && supportsTerminal && terminalEnvironment(raw) !== null,
     paths: kind === 'code' ? paths : [],
     marker: evaluateCount === null ? '' : String(evaluateCount),
     failedVerdict: choice ? null : failedVerdict,
+    ...(choiceResultHidden ? { choiceResultHidden: true } : {}),
     ...(questions ? { questions } : {}),
     feedback: {
       compiler: publicText(raw.last_compile_output, 32_000),
@@ -630,7 +672,7 @@ export function createTransport({
     if (raw.work_end_forbid_evaluate) fail('choice_closed')
     mutationAllowed(task)
     const answer = choiceAnswers(task.questions, answers)
-    if (Buffer.byteLength(JSON.stringify(answer)) > 96_000) fail('invalid_input')
+    if (Buffer.byteLength(JSON.stringify(answer)) > 96_000) fail('invalid_input', '提交答案序列化体积超出 96000 字节上限')
     const { binding } = task
     const { data } = await call('POST', '/tasks/' + binding.taskId + '/choose_build.json', {
       account,
@@ -643,8 +685,9 @@ export function createTransport({
         homework_common_id: Number(binding.homeworkId),
       },
     })
-    const score = choiceScore(data, task.questions.length,
-      raw.shixun_choice_public_result === true || raw.shixun_choice_public_result === 1)
+    const choicePublicResult = raw.shixun_choice_public_result === true || raw.shixun_choice_public_result === 1
+    const score = choiceScore(data, task.questions.length, choicePublicResult)
+      ?? hiddenChoiceResult(data, task.questions.length, choicePublicResult)
     if (!score) fail('uncertain')
     return { state: choiceState(score, true), ...score }
   }
@@ -779,7 +822,7 @@ export function createTransport({
         homework_common_id: binding.homeworkId,
       },
     })
-    if (data.status !== 0 || !record(data.data)) fail('uncertain')
+    if (data.status !== 0 || !record(data.data)) fail('uncertain', `start_status=${String(data.status)} data=${record(data.data) ? 'ok' : typeof data.data}`)
     const connection = data.data
     let endpoint
     try {

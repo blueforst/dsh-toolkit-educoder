@@ -5,6 +5,9 @@ window.__ModuleLoader__.load({
     const { createPortal } = require('react-dom');
     const { Tooltip, useAnchoredPosition, useDismissOnOutsidePointer } = require('@deepseek-ai/dsh-client-ui-primitives');
     const h = React.createElement;
+    // DSH 0.2.2-rc.2 将面板定位迁移到 CSS 锚点，旧版仍提供定位 hook。
+    const usesLegacyPosition = typeof useAnchoredPosition === 'function';
+    const useLegacyPosition = usesLegacyPosition ? useAnchoredPosition : () => null;
     // 与原生统计项使用相同设计变量，样式仅作用于本插件。
     const css = `
       .forst-cost-anchor{min-width:0;display:inline-flex;font-size:calc(var(--dsh-content-font-size-secondary,13px) - 1px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px))}
@@ -14,6 +17,8 @@ window.__ModuleLoader__.load({
       .forst-cost-pill[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
       @media(hover:hover){.forst-cost-pill:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}}
       .forst-cost-panel{z-index:1100;box-sizing:border-box;border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);width:max-content;min-width:min(300px,100vw - 24px);max-width:min(440px,100vw - 24px);max-height:calc(100dvh - 24px);overflow:auto;backdrop-filter:var(--dsw-menu-backdrop-filter);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);color:var(--dsw-alias-label-secondary);cursor:default;border:0;padding:16px;font-size:12px;line-height:18px;position:fixed}
+      .forst-cost-panel--anchored{height:fit-content;position-anchor:var(--forst-cost-anchor);top:max(12px,var(--dsh-frame-overlay-top,12px));left:max(12px,anchor(left));right:12px;bottom:calc(anchor(top) + 8px);align-self:safe end;justify-self:safe start;position-try-fallbacks:--forst-cost-viewport-end;margin:0}
+      @position-try --forst-cost-viewport-end{left:12px;right:12px;justify-self:safe end}
       .forst-cost-title{color:var(--dsw-alias-label-primary);justify-content:space-between;gap:16px;margin-bottom:8px;font-weight:500;display:flex}
       .forst-cost-title-label{align-items:center;gap:6px;min-width:0;display:inline-flex}
       .forst-cost-title-label svg{flex:none;width:14px;height:14px}
@@ -35,7 +40,8 @@ window.__ModuleLoader__.load({
       const panelRef = React.useRef(null);
       const triggerRef = React.useRef(null);
       const dialogId = React.useId();
-      const pos = useAnchoredPosition({ open, anchorRef: rootRef, panelRef, side: 'top', gap: 8, margin: 12 });
+      const anchorName = `--forst-cost-${dialogId.replaceAll(/[^\w-]/g, '')}`;
+      const pos = useLegacyPosition({ open, anchorRef: rootRef, panelRef, side: 'top', gap: 8, margin: 12 });
       useDismissOnOutsidePointer(rootRef, open, setOpen, panelRef);
       React.useEffect(() => {
         if (!open) return;
@@ -55,13 +61,18 @@ window.__ModuleLoader__.load({
       const label = `${amount}${cost.unpricedCalls ? ' *' : ''}`;
       return h('span', {
         ref: rootRef, className: 'forst-cost-anchor',
+        style: usesLegacyPosition ? undefined : { anchorName },
         'data-composer-stat': 'session-cost', 'data-dsh-session-cost': 'true',
         'data-usd': cost.usd, 'data-priced-calls': cost.pricedCalls, 'data-unpriced-calls': cost.unpricedCalls,
       },
       h(Tooltip, { label: `会话费用 ${label}`, side: 'top', portal: true, delayMs: 200, onlyWhenClipped: true, disabled: open },
         h('button', { ref: triggerRef, className: 'forst-cost-pill', type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': open, 'aria-controls': open ? dialogId : undefined, 'aria-label': `会话费用 ${label}，点击查看明细`, onClick: () => setOpen(value => !value) },
           h(CostIcon), h('span', { className: 'forst-cost-label' }, label))),
-      open && createPortal(h('div', { id: dialogId, ref: panelRef, className: 'forst-cost-panel', role: 'dialog', 'aria-label': '会话费用', 'data-session-cost-details': true, style: pos ?? { visibility: 'hidden', left: 0, top: 0 } },
+      open && createPortal(h('div', {
+        id: dialogId, ref: panelRef, role: 'dialog', 'aria-label': '会话费用', 'data-session-cost-details': true,
+        className: usesLegacyPosition ? 'forst-cost-panel' : 'forst-cost-panel forst-cost-panel--anchored',
+        style: usesLegacyPosition ? pos ?? { visibility: 'hidden', left: 0, top: 0 } : { '--forst-cost-anchor': anchorName },
+      },
         h('div', { className: 'forst-cost-title' }, h('span', { className: 'forst-cost-title-label' }, h(CostIcon), '会话费用'), h('span', { className: 'forst-cost-title-value' }, label)),
         h('div', { className: 'forst-cost-rule', 'aria-hidden': true }),
         h('dl', { className: 'forst-cost-details' },

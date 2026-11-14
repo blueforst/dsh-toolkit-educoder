@@ -130,9 +130,9 @@ export function createService({
       const status = existing.get(homework.id);
       const complete = Number.isSafeInteger(homework.taskCount) && homework.taskCount > 0 &&
         Number.isSafeInteger(homework.passedCount) && homework.passedCount >= homework.taskCount;
-      if (complete || status === 'passed') {
+      if (complete || status === 'passed' || status === 'pending_review') {
         skippedCompleted++;
-      } else if (status && status !== 'waiting') {
+      } else if (status && status !== 'waiting' && status !== 'paused') {
         skippedExisting++;
       } else {
         targets.push({ accountId, courseId, homeworkId: homework.id, courseTitle: course.title, homeworkTitle: homework.title });
